@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS skill_term_stats (
     term         TEXT NOT NULL,
     search_count INTEGER DEFAULT 1,
     load_count   INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
     PRIMARY KEY (skill_name, term)
 );
 """
@@ -720,14 +721,21 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             # Compute average load ratio for matched terms
             try:
                 rows = conn.execute(
-                    """SELECT term, load_count, search_count FROM skill_term_stats
+                    """SELECT term, load_count, search_count, success_count FROM skill_term_stats
                        WHERE skill_name = ? AND term IN ({})"""
                     .format(",".join("?" for _ in matched_terms)),
                     (sname,) + tuple(mt.lower() for mt in matched_terms),
                 ).fetchall()
                 if rows:
-                    avg_ratio = sum(r["load_count"] / max(r["search_count"], 1) for r in rows) / len(rows)
-                    r["score"] *= (1.0 + 0.15 * avg_ratio)
+                    import math as _m
+                    _avg_eff = sum(
+                        (r["success_count"] * 2 + r["load_count"]) / max(r["search_count"] * 3, 1)
+                        for r in rows
+                    ) / len(rows)
+                    _confidence = 1 - _m.pow(0.5, sum(r["search_count"] for r in rows) / max(len(rows), 1) / 5)
+                    _adj = (_avg_eff - 0.5) * 2
+                    _tanh = _adj / (1 + abs(_adj) * 0.5)
+                    r["score"] *= (1.0 + 0.1 * _tanh * _confidence)
             except Exception:
                 pass
     conn.commit()
