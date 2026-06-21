@@ -638,11 +638,17 @@ def _handle_slash_command(args: str) -> str | None:
                 node_count = count
                 edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
 
-            # Show scanned dirs
+            # Show scanned dirs (use os.walk to follow symlinks)
             scanned = _find_all_skills_dirs()
             dirs_info = []
             for d in scanned:
-                cnt = len(list(d.rglob("SKILL.md"))) if d.exists() else 0
+                if d.exists():
+                    cnt = sum(
+                        1 for root, dirs, files in os.walk(str(d), followlinks=True)
+                        if "SKILL.md" in files
+                    )
+                else:
+                    cnt = 0
                 dirs_info.append(f"    {d}  ({cnt} SKILL.md)")
             dirs_text = "\n".join(dirs_info) if dirs_info else "    (none)"
 
