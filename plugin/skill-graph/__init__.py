@@ -894,10 +894,10 @@ def _handle_slash_command(args: str) -> str | None:
         except Exception as e:
             return f"Load failed: {e}"
 
-    elif subcmd == "info":
-        """Show metadata and terms with stats."""
+    elif subcmd in ("show", "detail", "info"):
+        """Show skill metadata, edges, and term associations."""
         if not rest:
-            return "Usage: /skill-graph info <skill-name>"
+            return "Usage: /skill-graph show|detail|info <skill-name>"
         try:
             conn = _ensure_graph()
             node = conn.execute(
@@ -912,42 +912,9 @@ def _handle_slash_command(args: str) -> str | None:
                 f"  Description: {node['description'] or ''}",
                 f"  Tags:        {node['tags'] or ''}",
                 f"  Path:        {node['file_path'] or ''}",
-            ]) + _format_terms(rest)
+            ]) + _format_edges(rest)
         except Exception as e:
-            return f"Info failed: {e}"
-
-    elif subcmd in ("relations", "rels"):
-        """Show graph edges."""
-        if not rest:
-            return "Usage: /skill-graph relations <skill-name>"
-        try:
-            return _format_edges(rest)
-        except Exception as e:
-            return f"Relations failed: {e}"
-
-    elif subcmd == "all":
-        """Show everything: node info + edges + terms."""
-        if not rest:
-            return "Usage: /skill-graph all <skill-name>"
-        try:
-            conn = _ensure_graph()
-            node = conn.execute(
-                "SELECT name, category, description, tags, file_path FROM skill_nodes WHERE name = ?",
-                (rest,),
-            ).fetchone()
-            if not node:
-                return f"Not found: {rest}  (try /sg list)"
-            return "
-".join([
-                f"Node: {node['name']}",
-                f"  Category:    {node['category'] or ''}",
-                f"  Description: {node['description'] or ''}",
-                f"  Tags:        {node['tags'] or ''}",
-                f"  Path:        {node['file_path'] or ''}",
-            ]) + "
-" + _format_edges(rest) + _format_terms(rest)
-        except Exception as e:
-            return f"All failed: {e}"
+            return f"Show failed: {e}"
 
     elif subcmd in ("status", "stats"):
         try:
