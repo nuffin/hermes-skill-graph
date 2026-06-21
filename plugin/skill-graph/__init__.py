@@ -810,7 +810,7 @@ def _handle_slash_command(args: str) -> str | None:
             return f"Rebuild failed: {e}"
 
     elif subcmd == "load":
-        """Directly load and display a skill's content."""
+        """Load a skill and return its content (agent-facing)."""
         if not rest:
             return "Usage: /skill-graph load <skill-name>"
         try:
@@ -818,17 +818,35 @@ def _handle_slash_command(args: str) -> str | None:
             data = json.loads(result)
             if not data.get("success"):
                 return f"Not found: {rest}"
-            return "\n".join([
-                f"Skill: {data['name']}",
-                f"  Category:    {data.get('category', '')}",
-                f"  Description: {data.get('description', '')[:120]}",
-                f"  Tags:        {', '.join(data.get('tags', [])[:6])}",
-                f"  Path:        {data.get('file_path', '')}",
-                f"  Relations:   {len(data.get('relations', []))} defined",
-                f"  Content:     {len(data.get('content', ''))} chars",
-            ])
+            content_chars = len(data.get("content", ""))
+            return (
+                f"Loaded: {data['name']} ({content_chars} chars)\n"
+                f"{data.get('content', '')[:300]}..."
+            )
         except Exception as e:
             return f"Load failed: {e}"
+
+    elif subcmd in ("show", "detail", "info"):
+        """Show skill metadata, edges, and term associations."""
+        if not rest:
+            return "Usage: /skill-graph show|detail|info <skill-name>"
+        try:
+            conn = _ensure_graph()
+            node = conn.execute(
+                "SELECT name, category, description, tags, file_path FROM skill_nodes WHERE name = ?",
+                (rest,),
+            ).fetchone()
+            if not node:
+                return f"Not found: {rest}  (try /sg list to see available skills)"
+            return "\n".join([
+                f"Node: {node['name']}",
+                f"  Category:    {node['category'] or ''}",
+                f"  Description: {node['description'] or ''}",
+                f"  Tags:        {node['tags'] or ''}",
+                f"  Path:        {node['file_path'] or ''}",
+            ]) + _format_edges(rest)
+        except Exception as e:
+            return f"Show failed: {e}"
 
     elif subcmd in ("status", "stats"):
         try:
