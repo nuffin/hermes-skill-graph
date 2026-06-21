@@ -784,12 +784,29 @@ _global_conn: sqlite3.Connection | None = None
 _global_synced = False
 
 
+
+def _migrate_db(conn):
+    try:
+        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN success_count INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_searched TEXT")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_loaded TEXT")
+    except:
+        pass
+
+
 def _ensure_graph() -> sqlite3.Connection:
     """Lazy-init the graph DB connection. Syncs on first access."""
     global _global_conn, _global_synced
     if _global_conn is None:
         conn = _get_conn()
         _init_db(conn)
+        _migrate_db(conn)
         _global_conn = conn
     if not _global_synced:
         with _graph_lock:
