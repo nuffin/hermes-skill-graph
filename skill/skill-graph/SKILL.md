@@ -1,14 +1,24 @@
 ---
 name: skill-graph
-description: "Skill knowledge graph — find the right skill by intent. Uses relationship traversal (depends_on, complemented_by, alternative_to) instead of flat name/tag matching. Call skill_graph_search() tool directly."
+description: Skill knowledge graph — find the right skill by intent. Uses relationship
+  traversal (depends_on, complemented_by, alternative_to) instead of flat name/tag
+  matching. Call skill_graph_search() tool directly.
 version: 1.0.0
-author: "Hauzer S. Lee"
+author: Hauzer S. Lee
 license: MIT
 metadata:
   hermes:
-    tags: [hermes, skills, discovery, graph, plugin]
-    related_skills: [intent-router]
+    tags:
+    - hermes
+    - skills
+    - discovery
+    - graph
+    - plugin
+    related_skills:
+    - intent-router
+category: hermes
 ---
+
 
 # Skill Graph
 
@@ -31,6 +41,36 @@ The plugin registers ``/skill-graph`` with subcommands:
 
 - ``/skill-graph rebuild`` — Force full graph rebuild (re-scan all SKILL.md)
 - ``/skill-graph status`` — Show graph stats (skill count, edge count, DB size)
+
+## Tools
+
+The plugin registers two tools:
+
+- ``skill_graph_search(query)`` — Find skills by intent (PREFERRED over skills_list())
+- ``skill_load(name)`` — Load a skill's full SKILL.md content (alternative to skill_view())
+
+Use them together:
+
+```
+skill_graph_search("deploy kubernetes")
+  → returns [{name: "deploy-k8s", ...}, {name: "config-validate", rel: "depends_on"}, ...]
+skill_load("deploy-k8s")
+  → returns full SKILL.md content with metadata
+```
+
+## Configuration
+
+Add extra skill directories in ``config.yaml``:
+
+```yaml
+skills:
+  config:
+    skill-graph:
+      source_dirs:
+        - ~/path/to/extra/skills
+```
+
+The default ``~/.hermes/skills/`` is always scanned.
 
 ## How to Use
 
