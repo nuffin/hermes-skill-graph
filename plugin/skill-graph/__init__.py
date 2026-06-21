@@ -626,13 +626,23 @@ def _handle_slash_command(args: str) -> str | None:
             node_count = conn.execute("SELECT COUNT(*) FROM skill_nodes").fetchone()[0]
             edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
             db_path = _db_path()
+
+            # Debug: show scanned dirs
+            scanned = _find_all_skills_dirs()
+            dirs_info = []
+            for d in scanned:
+                count = len(list(d.rglob("SKILL.md"))) if d.exists() else 0
+                dirs_info.append(f"    {d}  ({count} SKILL.md)")
+            dirs_text = "\n".join(dirs_info) if dirs_info else "    (none)"
+
             db_size = db_path.stat().st_size if db_path.exists() else 0
             return (
                 f"Skill Graph status\n"
                 f"  Skills:  {node_count}\n"
                 f"  Edges:   {edge_count}\n"
                 f"  DB size: {db_size / 1024:.1f} KB\n"
-                f"  DB path: {db_path}"
+                f"  DB path: {db_path}\n"
+                f"  Scanned dirs:\n{dirs_text}"
             )
         except Exception as e:
             return f"Status check failed: {e}"
