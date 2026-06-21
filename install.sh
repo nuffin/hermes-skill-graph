@@ -51,7 +51,6 @@ ${C_BOLD}USAGE${C_RESET}
 ${C_BOLD}WHAT IT DOES${C_RESET}
     Copies plugin/skill-graph/  →  \$HERMES_HOME/plugins/skill-graph/
     Copies skill/skill-graph/   →  \$HERMES_HOME/skills/skill-graph/
-    Copies skill/intent-router/ →  \$HERMES_HOME/skills/intent-router/
 
     Use --symlink during development to link instead of copy
     (so changes to the repo are reflected immediately).
