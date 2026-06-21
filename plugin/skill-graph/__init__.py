@@ -78,6 +78,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts USING fts5(
     name, category, description, tags,
     tokenize='porter unicode61'
 );
+
+CREATE TABLE IF NOT EXISTS skill_terms (
+    term        TEXT NOT NULL,
+    skill_name  TEXT NOT NULL REFERENCES skill_nodes(name),
+    strength    REAL DEFAULT 1.0,
+    source      TEXT DEFAULT 'tag',   -- 'name' | 'tag' | 'description'
+    PRIMARY KEY (term, skill_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_terms_term ON skill_terms(term);
+CREATE INDEX IF NOT EXISTS idx_terms_skill ON skill_terms(skill_name);
 """
 
 # ── Database helpers ────────────────────────────────────────────────────────
@@ -282,6 +293,65 @@ def _parse_skill_md(path: Path) -> dict[str, Any]:
     return result
 
 
+# ── Term extraction ─────────────────────────────────────────────────────────
+
+# English stop words filtered from description terms
+_STOP_WORDS: set[str] = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "each",
+    "every", "both", "few", "more", "most", "other", "some", "such", "no",
+    "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    "and", "but", "or", "if", "because", "until", "while", "about",
+    "using", "via", "its", "their", "your", "this", "that", "these",
+    "those", "which", "what", "who", "whom", "make", "made", "set", "get",
+}
+
+
+def _extract_skill_terms(name: str, tags: list[str], description: str) -> list[tuple[str, float, str]]:
+    """Extract (term, strength, source) triples from a skill's metadata.
+
+    Sources:
+      - name: split on ``-_``, each part strength=1.0
+      - tags: each tag verbatim, strength=1.0
+      - description: English words (3+ chars) + Chinese phrases (2-6 chars), strength=0.7
+    """
+    seen: dict[str, tuple[float, str]] = {}
+
+    def add(t: str, s: float, src: str):
+        t = t.strip().lower()
+        if t and (t not in seen or seen[t][0] < s):
+            seen[t] = (s, src)
+
+    # From name
+    clean = name.replace("_", "-")
+    for part in clean.split("-"):
+        if len(part) > 1:
+            add(part, 1.0, "name")
+
+    # From tags
+    for tag in tags:
+        t = tag.strip().lower().replace("_", "-")
+        if len(t) > 0:
+            add(t, 1.0, "tag")
+
+    # From description
+    if description:
+        for w in re.findall(r"[a-zA-Z][a-zA-Z]{2,}", description):
+            w = w.lower()
+            if w not in _STOP_WORDS and len(w) > 2:
+                add(w, 0.7, "description")
+        for c in re.findall(r"[\u4e00-\u9fff]{2,6}", description):
+            if len(c) > 1:
+                add(c, 0.7, "description")
+
+    return [(t, s, src) for t, (s, src) in seen.items()]
+
+
 # ── Graph sync ──────────────────────────────────────────────────────────────
 
 
@@ -337,6 +407,16 @@ def _upsert_skill(conn: sqlite3.Connection, name: str, path: Path, now: float) -
         "INSERT INTO skill_fts (name, category, description, tags) VALUES (?, ?, ?, ?)",
         (name, info.get("category", ""), info.get("description", ""), tags_text),
     )
+
+    # Upsert terms
+    conn.execute("DELETE FROM skill_terms WHERE skill_name = ?", (name,))
+    terms = _extract_skill_terms(name, info.get("tags", []), info.get("description", ""))
+    for term_text, strength, source in terms:
+        conn.execute(
+            "INSERT OR IGNORE INTO skill_terms (term, skill_name, strength, source) VALUES (?, ?, ?, ?)",
+            (term_text, name, strength, source),
+        )
+
     return info
 
 
@@ -350,6 +430,7 @@ def _full_rebuild(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM skill_edges")
     conn.execute("DELETE FROM skill_nodes")
     conn.execute("DELETE FROM skill_fts")
+    conn.execute("DELETE FROM skill_terms")
 
     # Drop and recreate FTS table to ensure correct schema
     # (old DBs may have content='' which breaks JOIN queries)
@@ -422,6 +503,7 @@ def _incremental_sync(conn: sqlite3.Connection) -> int:
         conn.execute("DELETE FROM skill_edges WHERE source = ? OR target = ?", (name, name))
         conn.execute("DELETE FROM skill_nodes WHERE name = ?", (name,))
         conn.execute("DELETE FROM skill_fts WHERE name = ?", (name,))
+        conn.execute("DELETE FROM skill_terms WHERE skill_name = ?", (name,))
 
     conn.commit()
     logger.info(
@@ -531,7 +613,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             }
             expansion_queue.append(target)
 
-    # Phase 3: Tag match
+    # Phase 3: Tag match (existing)
     terms = _extract_terms(query)
     for term in terms:
         cursor = conn.execute(
@@ -546,6 +628,33 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                     info["relevance"] = "tag_match"
                     info["score"] = 0.7
                     results[info["name"]] = info
+
+    # Phase 4: Term table match — direct term→skill lookup from the
+    # skill_terms table (auto-extracted from name, tags, description).
+    # This catches Chinese terms and split-name parts that FTS5 misses.
+    for term in terms:
+        cursor = conn.execute(
+            """SELECT t.skill_name, t.strength, t.source, n.category, n.description
+               FROM skill_terms t
+               JOIN skill_nodes n ON t.skill_name = n.name
+               WHERE t.term = ? AND t.skill_name NOT IN ({})
+               ORDER BY t.strength DESC
+               LIMIT 5""".format(",".join("?" for _ in seen)) if seen else "1=1",
+            (term.lower(),) + (tuple(seen) if seen else ()),
+        )
+        for row in cursor:
+            sname = row["skill_name"]
+            seen.add(sname)
+            results[sname] = {
+                "name": sname,
+                "category": row["category"] or "",
+                "description": row["description"] or "",
+                "tags": [],
+                "file_path": "",
+                "relevance": "term_match",
+                "relationship_chain": [f"term[{term}] → {sname} (strength={row['strength']}, source={row['source']})"],
+                "score": 0.8 * row["strength"],
+            }
 
     sorted_results = sorted(results.values(), key=lambda r: -r["score"])
     return sorted_results[:limit]
@@ -636,6 +745,7 @@ def _handle_slash_command(args: str) -> str | None:
             conn = _ensure_graph()
             node_count = conn.execute("SELECT COUNT(*) FROM skill_nodes").fetchone()[0]
             edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
+            term_count = conn.execute("SELECT COUNT(DISTINCT term) FROM skill_terms").fetchone()[0]
             db_path = _db_path()
 
             if node_count == 0:
@@ -662,6 +772,7 @@ def _handle_slash_command(args: str) -> str | None:
                 f"Skill Graph status\n"
                 f"  Skills:  {node_count}\n"
                 f"  Edges:   {edge_count}\n"
+                f"  Terms:   {term_count}\n"
                 f"  DB size: {db_size / 1024:.1f} KB\n"
                 f"  DB path: {db_path}\n"
                 f"  Scanned dirs:\n{dirs_text}"
