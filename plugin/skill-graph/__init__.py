@@ -813,9 +813,10 @@ def _handle_slash_command(args: str) -> str | None:
 # ── Tool handlers ───────────────────────────────────────────────────────────
 
 
-def _handle_skill_graph_search(**kw) -> str:
+def _handle_skill_graph_search(args: dict | None = None, **kw) -> str:
     """Handle skill_graph_search tool call."""
-    args = kw.get("args", kw)
+    if not isinstance(args, dict):
+        args = kw.get("args", kw)
     query = args.get("query", "") if isinstance(args, dict) else ""
     limit = int(args.get("limit", 10)) if isinstance(args, dict) else 10
 
@@ -866,9 +867,10 @@ def _handle_skill_graph_search(**kw) -> str:
         return json.dumps({"success": False, "error": str(e)})
 
 
-def _handle_skill_load(**kw) -> str:
+def _handle_skill_load(args: dict | None = None, **kw) -> str:
     """Handle skill_load tool call. Loads full SKILL.md content by name."""
-    args = kw.get("args", kw)
+    if not isinstance(args, dict):
+        args = kw.get("args", kw)
     name = args.get("name", "") if isinstance(args, dict) else ""
 
     if not name:
