@@ -897,11 +897,43 @@ def _handle_slash_command(args: str) -> str | None:
         except Exception as e:
             return f"Config failed: {e}"
 
+    elif subcmd in ("score", "explain"):
+        """Show detailed scoring breakdown for a search query."""
+        if not rest:
+            return "Usage: /skill-graph score <query>"
+        try:
+            conn = _ensure_graph()
+            with _graph_lock:
+                results = _search_graph(rest, conn, limit=8)
+                lines = [f"Score breakdown for: {rest}", ""]
+                for r in results:
+                    name = r["name"]
+                    score = r["score"]
+                    rel = r.get("relevance", "?")
+                    stats_rows = conn.execute(
+                        "SELECT term, load_count, search_count FROM skill_term_stats WHERE skill_name = ?",
+                        (name,),
+                    ).fetchall()
+                    if stats_rows:
+                        stats_line = "; ".join(
+                            f"{s['term']}: load={s['load_count']}/{s['search_count']}"
+                            for s in stats_rows[:5]
+                        )
+                    else:
+                        stats_line = "(no stats)"
+                    lines.append(f"  {name:40s} score={score:.4f}  [{rel}]")
+                    lines.append(f"  {'':40s}  stats: {stats_line}")
+                lines.append(f"\n{len(results)} results shown")
+                return "\n".join(lines)
+        except Exception as e:
+            return f"Score breakdown failed: {e}"
+
     else:
         return (
             "/skill-graph — Skill knowledge graph\n\n"
             "Subcommands:\n"
             "  /skill-graph search <query>   Search skills by intent\n"
+            "  /skill-graph score <query>    Show scoring breakdown with term stats\n"
             "  /skill-graph list             List all skills in graph\n"
             "  /skill-graph config           Show configuration (paths, DB)\n"
             "  /skill-graph status           Show graph stats\n"
