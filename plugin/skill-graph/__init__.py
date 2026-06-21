@@ -581,6 +581,7 @@ def _get_node_info(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None
 
 _graph_lock = threading.Lock()
 _global_conn: sqlite3.Connection | None = None
+_global_synced = False
 
 SKILL_LOAD_PROMPT = (
     "Skill discovery protocol: Use skill_graph_search() to find skills "
@@ -591,12 +592,20 @@ SKILL_LOAD_PROMPT = (
 
 
 def _ensure_graph() -> sqlite3.Connection:
-    """Lazy-init the graph DB connection (no auto-sync)."""
-    global _global_conn
+    """Lazy-init the graph DB connection. Syncs on first access."""
+    global _global_conn, _global_synced
+
     if _global_conn is None:
         conn = _get_conn()
         _init_db(conn)
         _global_conn = conn
+
+    if not _global_synced:
+        with _graph_lock:
+            if not _global_synced:
+                _sync_graph(_global_conn)
+                _global_synced = True
+
     return _global_conn
 
 
@@ -627,12 +636,20 @@ def _handle_slash_command(args: str) -> str | None:
             edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
             db_path = _db_path()
 
-            # Debug: show scanned dirs
+            # If DB is empty, trigger a sync right here (belt-and-suspenders
+            # for when on_session_start hook doesn't fire)
+            if node_count == 0:
+                with _graph_lock:
+                    count = _sync_graph(conn)
+                node_count = count
+                edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
+
+            # Show scanned dirs
             scanned = _find_all_skills_dirs()
             dirs_info = []
             for d in scanned:
-                count = len(list(d.rglob("SKILL.md"))) if d.exists() else 0
-                dirs_info.append(f"    {d}  ({count} SKILL.md)")
+                cnt = len(list(d.rglob("SKILL.md"))) if d.exists() else 0
+                dirs_info.append(f"    {d}  ({cnt} SKILL.md)")
             dirs_text = "\n".join(dirs_info) if dirs_info else "    (none)"
 
             db_size = db_path.stat().st_size if db_path.exists() else 0
@@ -836,16 +853,14 @@ def register(ctx):
         args_hint="rebuild|status",
     )
 
-    # ── Hook: on_session_start — sync graph + inject guidance ──
+    # ── Hook: on_session_start — ensure DB + inject guidance ──
     def _on_session_start(**kw):
         try:
+            # _ensure_graph() handles sync on first access
             conn = _ensure_graph()
-            with _graph_lock:
-                count = _sync_graph(conn)
-            logger.info("Skill graph synced: %d skills", count)
+            logger.info("Skill graph ready")
 
             # Best-effort inject discovery protocol into the conversation.
-            # This may fail silently if the CLI ref isn't ready yet (gateway mode).
             try:
                 ctx.inject_message(SKILL_LOAD_PROMPT, role="system")
             except Exception:
