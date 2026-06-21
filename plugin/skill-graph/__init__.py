@@ -142,23 +142,17 @@ def _find_all_skills_dirs() -> list[Path]:
     dirs: list[Path] = []
 
     # 1. Primary Hermes skills dir (always scanned — Hermes indexes from here)
+    #    When running inside a named profile, HERMES_HOME points to the profile
+    #    dir, so this correctly gets the current profile's skills.
     primary = hermes_home / "skills"
     if primary.exists():
         dirs.append(primary)
 
-    # 2. Profile-specific skills
-    profiles_dir = hermes_home / "profiles"
-    if profiles_dir.exists():
-        for pdir in profiles_dir.iterdir():
-            sdir = pdir / "skills"
-            if sdir.exists():
-                dirs.append(sdir)
-
-    # 3. Configured source dirs (skill-graph's own extra paths)
+    # 2. Configured source dirs (skill-graph's own extra paths)
     source_dirs = _read_source_dirs_from_config()
     dirs.extend(source_dirs)
 
-    # 4. External skill dirs from Hermes config
+    # 3. External skill dirs from Hermes config
     try:
         from hermes_cli.config import load_config
         config = load_config()
