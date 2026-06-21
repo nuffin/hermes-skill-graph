@@ -699,13 +699,6 @@ _graph_lock = threading.Lock()
 _global_conn: sqlite3.Connection | None = None
 _global_synced = False
 
-SKILL_LOAD_PROMPT = (
-    "Skill discovery protocol: Use skill_graph_search() to find skills "
-    "by intent, then call skill_load(name) to load a skill's full content. "
-    "Prefer this over skills_list() — the graph finds relevant skills that "
-    "flat name/tag matching misses."
-)
-
 
 def _ensure_graph() -> sqlite3.Connection:
     """Lazy-init the graph DB connection. Syncs on first access."""
@@ -989,18 +982,11 @@ def register(ctx):
         args_hint="rebuild|status",
     )
 
-    # ── Hook: on_session_start — ensure DB + inject guidance ──
+    # ── Hook: on_session_start — ensure DB ──
     def _on_session_start(**kw):
         try:
-            # _ensure_graph() handles sync on first access
-            conn = _ensure_graph()
+            _ensure_graph()
             logger.info("Skill graph ready")
-
-            # Best-effort inject discovery protocol into the conversation.
-            try:
-                ctx.inject_message(SKILL_LOAD_PROMPT, role="system")
-            except Exception:
-                pass
         except Exception:
             logger.exception("skill-graph: on_session_start failed")
 
