@@ -67,9 +67,9 @@ Removes the symlinks but keeps the graph database (`~/.hermes/personal/skill-gra
 
 | Component | Target Path | Purpose |
 |-----------|-------------|---------|
-| Plugin | `~/.hermes/plugins/skill-graph/` | Graph engine, search tool, lifecycle hooks |
-| Skill | `~/.hermes/skills/skill-graph/` | Agent guidance on using the graph |
-| Database | `~/.hermes/skill-graph.db` (default profile) or `~/.hermes/profiles/<name>/skill-graph.db` | SQLite + FTS5 graph (auto-created at runtime) |
+| Plugin | `~/.hermes/plugins/skill-graph/` | Graph engine, `skill_graph_search()` + `skill_load()` tools |
+| Skill | `~/.hermes/skills/skill-graph/` | Agent guidance on using the graph (fallback) |
+| Database | `~/.hermes/skill-graph.db` (default) or `~/.hermes/profiles/<name>/skill-graph.db` | SQLite + FTS5 graph (auto-created) |
 
 ---
 
@@ -140,20 +140,60 @@ Properties (optional, in `properties` dict):
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  on_session_start hook                               │
-│    └─ Full refresh: scan all SKILL.md, rebuild graph  │
-├─────────────────────────────────────────────────────┤
-│  post_tool_call hook                                  │
-│    └─ Detect skill_manage create/edit/patch           │
-│       └─ Incremental: update just that skill          │
-├─────────────────────────────────────────────────────┤
-│  skill_graph_search(query) tool                       │
-│    └─ FTS5 → Tag match → Graph traversal → Ranked    │
-└─────────────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────┐
+  │  on_session_start hook                               │
+  │    └─ Full refresh: scan all SKILL.md, rebuild graph  │
+  ├─────────────────────────────────────────────────────┤
+  │  post_tool_call hook                                  │
+  │    └─ Detect skill_manage create/edit/patch           │
+  │       └─ Incremental: update just that skill          │
+  ├─────────────────────────────────────────────────────┤
+  │  skill_graph_search(query) tool                       │
+  │    └─ FTS5 → Tag match → Graph traversal → Ranked    │
+  ├─────────────────────────────────────────────────────┤
+  │  skill_load(name) tool                                │
+  │    └─ Search all dirs → Read SKILL.md → Return       │
+  └─────────────────────────────────────────────────────┘
 ```
 
-### Storage
+## Configuration
+
+The plugin reads extra skill directories from ``config.yaml``:
+
+```yaml
+skills:
+  config:
+    skill-graph:
+      source_dirs:
+        - ~/path/to/extra/skills
+```
+
+This is in addition to the default ``~/.hermes/skills/``, which is always
+scanned.  ``source_dirs`` is the intended way to point the graph at PS repos,
+shared team skill repos, or any external collection of SKILL.md files that
+shouldn't clutter Hermes' own system-prompt skill index.
+
+Changes take effect on next session start (``/reset``).
+
+## Tools
+
+The plugin registers two tools:
+
+### ``skill_graph_search(query, limit)``
+
+**Preferred over ``skills_list()``.**  Searches the knowledge graph using
+FTS5 + typed-relationship traversal.  Returns ranked results with
+``relationship_chain`` arrays showing *why* each skill was found.
+
+### ``skill_load(name)``
+
+**Alternative to ``skill_view()``.**  Loads a skill's full SKILL.md content
+by name.  Works for skills in any configured directory (Hermes' default
+``~/.hermes/skills/``, ``source_dirs``, or external dirs).  Returns the raw
+content plus parsed metadata.  Use after ``skill_graph_search()`` to load
+discovered skills.
+
+## Storage
 
 - **SQLite** with WAL mode at `~/.hermes/skill-graph.db` (default profile)
 - **Per-profile**: `~/.hermes/profiles/<name>/skill-graph.db`
