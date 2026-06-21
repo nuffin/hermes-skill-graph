@@ -219,7 +219,8 @@ hermes-skill-graph/
 │   └── skill-graph/
 │       └── SKILL.md                   # Agent companion skill
 └── docs/
-    └── relations-format.md            # Full relations field spec
+    ├── relations-format.md            # Full relations field spec
+    └── skill-graph.md                 # Full usage documentation
 ```
 
 ---
