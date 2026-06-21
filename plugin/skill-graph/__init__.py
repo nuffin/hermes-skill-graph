@@ -1053,6 +1053,7 @@ def _handle_slash_command(args: str) -> str | None:
             "  /skill-graph search <query>   Search skills by intent\n"
             "  /skill-graph load <name>      Load and display skill details\n"
             "  /skill-graph score <query>    Show scoring breakdown with term stats\n"
+            "  /skill-graph all <name>        Show all metadata, edges, and terms\n"
             "  /skill-graph list             List all skills in graph\n"
             "  /skill-graph config           Show configuration (paths, DB)\n"
             "  /skill-graph status           Show graph stats\n"
