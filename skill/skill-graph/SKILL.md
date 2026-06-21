@@ -166,3 +166,19 @@ Hermes writes it to `~/.hermes/skills/<name>/`.
 
 For PS users: after creating a skill, use `personal-suite-skills-manager`
 to move it into the PS repo (git-tracked, graph-indexed, no symlink).
+
+## Creating Skills (Standalone)
+
+When creating a new skill with `skill_manage(action='create', ...)`,
+Hermes writes it to `~/.hermes/skills/<cat>/<name>/` (or flat if no category).
+
+**Move it to the graph-only dir so it doesn't bloat the prompt:**
+
+```bash
+mkdir -p $HERMES_HOME/skill-graph/agent-created
+mv ~/.hermes/skills/<cat>/<name> $HERMES_HOME/skill-graph/agent-created/<name>
+/skill-graph rebuild
+```
+
+The skill is now indexed by the graph but NOT in the system prompt.
+To load it: `skill_load("<name>")`.

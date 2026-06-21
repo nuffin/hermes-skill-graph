@@ -173,11 +173,19 @@ def _find_all_skills_dirs() -> list[Path]:
     if profile_skills.exists() and str(profile_skills) != str(global_skills):
         dirs.append(profile_skills)
 
-    # 4. Configured source dirs (skill-graph's own extra paths)
+    # 4. Agent-created skills (hardcoded default for standalone project)
+    #    Hermes skill_manage writes to ~/.hermes/skills/; after creation the
+    #    agent moves them here so they stay graph-discoverable without bloating
+    #    the system prompt index.
+    agent_created_dir = hermes_home / "skill-graph" / "agent-created"
+    if agent_created_dir.exists():
+        dirs.append(agent_created_dir)
+
+    # 5. Configured source dirs (skill-graph's own extra paths)
     source_dirs = _read_source_dirs_from_config()
     dirs.extend(source_dirs)
 
-    # 5. External skill dirs from Hermes config
+    # 6. External skill dirs from Hermes config
     try:
         from hermes_cli.config import load_config
         config = load_config()
