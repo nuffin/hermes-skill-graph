@@ -39,24 +39,16 @@ description, or when you suspect a flat search would miss relevant skills, use
 
 The plugin registers ``/skill-graph`` with subcommands:
 
-- ``/skill-graph rebuild`` — Force full graph rebuild (re-scan all SKILL.md)
-- ``/skill-graph status`` — Show graph stats (skill count, edge count, DB size)
+- ``/skill-graph search <query>``  Search skills by intent
+- ``/skill-graph list``            List all skills in graph (name + description)
+- ``/skill-graph status``          Show graph stats (counts, DB size)
+- ``/skill-graph config``          Show configuration (paths, scanned dirs)
+- ``/skill-graph rebuild``         Force full graph rebuild
 
 ## Tools
 
-The plugin registers two tools:
-
 - ``skill_graph_search(query)`` — Find skills by intent (PREFERRED over skills_list())
-- ``skill_load(name)`` — Load a skill's full SKILL.md content (alternative to skill_view())
-
-Use them together:
-
-```
-skill_graph_search("deploy kubernetes")
-  → returns [{name: "deploy-k8s", ...}, {name: "config-validate", rel: "depends_on"}, ...]
-skill_load("deploy-k8s")
-  → returns full SKILL.md content with metadata
-```
+- ``skill_load(name)`` — Load a skill's full content (alternative to skill_view())
 
 ## Configuration
 
