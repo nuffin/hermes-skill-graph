@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS skill_terms (
 
 CREATE INDEX IF NOT EXISTS idx_terms_term ON skill_terms(term);
 CREATE INDEX IF NOT EXISTS idx_terms_skill ON skill_terms(skill_name);
+
+CREATE TABLE IF NOT EXISTS skill_term_stats (
+    skill_name   TEXT NOT NULL REFERENCES skill_nodes(name),
+    term         TEXT NOT NULL,
+    search_count INTEGER DEFAULT 1,
+    load_count   INTEGER DEFAULT 0,
+    PRIMARY KEY (skill_name, term)
+);
 """
 
 # ── Database helpers ────────────────────────────────────────────────────────
@@ -576,11 +584,11 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
     results: dict[str, dict[str, Any]] = {}
     seen: set[str] = set()
 
-    # Phase 1: FTS5 direct search
+    # Phase 1: FTS5 direct search — include BM25 rank for normalized scoring
     fts_query = _fts_query(query)
     if fts_query:
         cursor = conn.execute(
-            """SELECT n.name, n.category, n.description, n.tags, n.file_path
+            """SELECT n.name, n.category, n.description, n.tags, n.file_path, f.rank
                FROM skill_fts f
                JOIN skill_nodes n ON f.name = n.name
                WHERE skill_fts MATCH ?
@@ -592,6 +600,8 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             name = row["name"]
             seen.add(name)
             tags = json.loads(row["tags"]) if row["tags"] else []
+            # Normalize BM25: rank is negative (closer to 0 = better)
+            bm25_score = 1.0 / (1.0 + abs(row["rank"]))
             results[name] = {
                 "name": name,
                 "category": row["category"],
@@ -600,10 +610,10 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                 "file_path": row["file_path"],
                 "relevance": "direct",
                 "relationship_chain": [],
-                "score": 1.0,
+                "score": bm25_score,
             }
 
-    # Phase 2: Graph expansion
+    # Phase 2: Graph expansion — only fills gaps not found by FTS5
     expansion_queue = list(seen)
     while expansion_queue and len(results) < limit * 3:
         current = expansion_queue.pop(0)
@@ -679,6 +689,37 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                 "relationship_chain": [f"term[{term}] → {sname} (strength={row['strength']}, source={row['source']})"],
                 "score": 0.8 * row["strength"],
             }
+
+    # Phase 5: Term-based scoring boost + search stats
+    # Apply per-(skill, term) load-ratio boost from skill_term_stats.
+    # A skill that gets loaded more often for a given term ranks higher.
+    for sname, r in results.items():
+        matched_terms = [t for t in terms if t.lower() in (r.get("name", "") + r.get("description", "") + str(r.get("tags", ""))).lower()]
+        if matched_terms:
+            for mt in matched_terms:
+                try:
+                    conn.execute(
+                        """INSERT INTO skill_term_stats (skill_name, term, search_count, load_count)
+                           VALUES (?, ?, 1, 0)
+                           ON CONFLICT(skill_name, term) DO UPDATE SET search_count = search_count + 1""",
+                        (sname, mt),
+                    )
+                except Exception:
+                    pass
+            # Compute average load ratio for matched terms
+            try:
+                rows = conn.execute(
+                    """SELECT term, load_count, search_count FROM skill_term_stats
+                       WHERE skill_name = ? AND term IN ({})"""
+                    .format(",".join("?" for _ in matched_terms)),
+                    (sname,) + tuple(mt.lower() for mt in matched_terms),
+                ).fetchall()
+                if rows:
+                    avg_ratio = sum(r["load_count"] / max(r["search_count"], 1) for r in rows) / len(rows)
+                    r["score"] *= (1.0 + 0.15 * avg_ratio)
+            except Exception:
+                pass
+    conn.commit()
 
     sorted_results = sorted(results.values(), key=lambda r: -r["score"])
     return sorted_results[:limit]
@@ -950,6 +991,22 @@ def _handle_skill_load(args: dict | None = None, **kw) -> str:
         content = path.read_text(encoding="utf-8", errors="replace")
         info = _parse_skill_md(path)
         skill_dir = str(path.parent)
+
+        # Track load event: increment load_count for skill's own terms
+        try:
+            _conn = _ensure_graph()
+            _sg_terms = _extract_terms(info.get("description", "") or "")
+            _sg_terms.append(info["name"].lower())
+            for _t in set(_sg_terms):
+                _conn.execute(
+                    """INSERT INTO skill_term_stats (skill_name, term, search_count, load_count)
+                       VALUES (?, ?, 0, 1)
+                       ON CONFLICT(skill_name, term) DO UPDATE SET load_count = load_count + 1""",
+                    (info["name"], _t),
+                )
+            _conn.commit()
+        except Exception:
+            pass
 
         return json.dumps({
             "success": True,
