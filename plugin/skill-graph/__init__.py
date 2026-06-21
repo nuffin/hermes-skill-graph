@@ -388,16 +388,25 @@ def _incremental_sync(conn: sqlite3.Connection) -> int:
 
     for name, path in deduped.items():
         existing = db_nodes.get(name)
-        if existing:
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                mtime = 0
-            if mtime <= existing["last_parsed"] and existing["file_path"] == str(path):
-                skipped_count += 1
-                continue
-        _upsert_skill(conn, name, path, now)
-        parsed_count += 1
+
+        # Condition 1: not in DB → must upsert
+        if existing is None:
+            _upsert_skill(conn, name, path, now)
+            parsed_count += 1
+            continue
+
+        # Condition 2: in DB but file changed (mtime newer or path relocated) → upsert
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        if mtime > existing["last_parsed"] or existing["file_path"] != str(path):
+            _upsert_skill(conn, name, path, now)
+            parsed_count += 1
+            continue
+
+        # Condition 3: in DB and unchanged → skip
+        skipped_count += 1
 
     current_names = set(deduped.keys())
     db_names = set(db_nodes.keys())
