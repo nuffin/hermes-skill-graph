@@ -216,8 +216,10 @@ hermes-skill-graph/
 │       ├── plugin.yaml                # Plugin manifest
 │       └── __init__.py                # ~730-line plugin implementation
 ├── skill/
-│   └── skill-graph/
-│       └── SKILL.md                   # Agent companion skill
+│   ├── skill-graph/
+│   │   └── SKILL.md                   # Agent companion skill
+│   └── intent-router/
+│       └── SKILL.md                   # Intent classification + routing
 └── docs/
     ├── relations-format.md            # Full relations field spec
     └── skill-graph.md                 # Full usage documentation

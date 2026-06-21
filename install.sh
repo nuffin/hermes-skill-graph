@@ -51,6 +51,7 @@ ${C_BOLD}USAGE${C_RESET}
 ${C_BOLD}WHAT IT DOES${C_RESET}
     Copies plugin/skill-graph/  →  \$HERMES_HOME/plugins/skill-graph/
     Copies skill/skill-graph/   →  \$HERMES_HOME/skills/skill-graph/
+    Copies skill/intent-router/ →  \$HERMES_HOME/skills/intent-router/
 
     Use --symlink during development to link instead of copy
     (so changes to the repo are reflected immediately).
@@ -103,6 +104,9 @@ do_install() {
             ok "Removed existing: $target"
         fi
     done
+    # Also clean up intent-router target
+    IR_TARGET="$HERMES_HOME/skills/intent-router"
+    [ -e "$IR_TARGET" ] && rm -rf "$IR_TARGET"
 
     # Copy plugin (use --symlink for development)
     cp -r "$PLUGIN_SRC" "$PLUGIN_TARGET"
@@ -110,6 +114,15 @@ do_install() {
 
     # Copy skill (use --symlink for development)
     cp -r "$SKILL_SRC" "$SKILL_TARGET"
+
+    # Copy intent-router
+    IR_SRC="$REPO_DIR/skill/intent-router"
+    if [ -f "$IR_SRC/SKILL.md" ]; then
+        cp -r "$IR_SRC" "$IR_TARGET"
+        ok "Skill installed: $IR_TARGET"
+    else
+        warn "Skipping intent-router (not found: $IR_SRC)"
+    fi
 
     echo ""
     echo -e "  ${C_BOLD}${C_GREEN}Install complete!${C_RESET}"
@@ -166,8 +179,10 @@ case "${1:-}" in
         for target in "$PLUGIN_TARGET" "$SKILL_TARGET"; do
             [ -e "$target" ] && rm -rf "$target"
         done
+        [ -e "$IR_TARGET" ] && rm -rf "$IR_TARGET"
         ln -sfn "$PLUGIN_SRC" "$PLUGIN_TARGET"
         ln -sfn "$SKILL_SRC" "$SKILL_TARGET"
+        ln -sfn "$REPO_DIR/skill/intent-router" "$IR_TARGET"
         ok "Symlinked plugin + skill (development mode)"
         ;;
     --uninstall|-u) do_uninstall ;;
