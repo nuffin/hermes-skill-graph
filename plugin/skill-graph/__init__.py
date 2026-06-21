@@ -76,8 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_type   ON skill_edges(rel_type);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts USING fts5(
     name, category, description, tags,
-    tokenize='porter unicode61',
-    content=''
+    tokenize='porter unicode61'
 );
 """
 
@@ -351,6 +350,20 @@ def _full_rebuild(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM skill_edges")
     conn.execute("DELETE FROM skill_nodes")
     conn.execute("DELETE FROM skill_fts")
+
+    # Drop and recreate FTS table to ensure correct schema
+    # (old DBs may have content='' which breaks JOIN queries)
+    conn.execute("DROP TABLE IF EXISTS skill_fts")
+    conn.execute("DROP TABLE IF EXISTS skill_fts_data")
+    conn.execute("DROP TABLE IF EXISTS skill_fts_idx")
+    conn.execute("DROP TABLE IF EXISTS skill_fts_docsize")
+    conn.execute("DROP TABLE IF EXISTS skill_fts_config")
+    conn.executescript("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts USING fts5(
+            name, category, description, tags,
+            tokenize='porter unicode61'
+        );
+    """)
 
     for name, path in deduped.items():
         _upsert_skill(conn, name, path, now)
