@@ -158,3 +158,19 @@ fall back to the standard progressive disclosure:
   relations. Ensure they're accurate.
 - Chinese text is indexed by FTS5 but doesn't benefit from porter stemming.
   Use explicit tags and relations for Chinese-dominated skills.
+
+## Creating Skills (Graph-Only)
+
+When creating a new skill with `skill_manage(action='create', ...)`,
+Hermes writes it to `~/.hermes/skills/<name>/`. This puts it in the
+system prompt index, which you want to avoid (bloats the prompt).
+
+**After creating, move it to the graph-only dir:**
+
+```bash
+mv ~/.hermes/skills/<name> ~/.hermes/skill-graph/agent-created/<name>
+/skill-graph rebuild
+```
+
+The skill is now indexed by the graph but NOT in the system prompt.
+To load it later: `skill_load("<name>")`.
