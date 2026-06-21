@@ -144,25 +144,40 @@ def _read_source_dirs_from_config() -> list[Path]:
 
 
 def _find_all_skills_dirs() -> list[Path]:
-    """Return all directories that might contain SKILL.md files.
+    """Return list of directories to scan for SKILL.md files.
 
-    Order: ``~/.hermes/skills/`` → profile skills → ``source_dirs`` → external
+    Always includes:
+      1. The global ~/.hermes/skills/ (Hermes built-in + any PS symlinks)
+      2. The global ~/.hermes/hermes-agent/skills/ (Hermes built-in source)
+      3. The current profile's skills/ dir (via HERMES_HOME)
+      4. Configured source_dirs (user's extra paths, e.g. PS repo)
+      5. Hermes config's external_dirs
     """
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    global_hermes = Path.home() / ".hermes"
+    hermes_home = Path(os.environ.get("HERMES_HOME", global_hermes))
     dirs: list[Path] = []
 
-    # 1. Primary Hermes skills dir (always scanned — Hermes indexes from here)
-    #    When running inside a named profile, HERMES_HOME points to the profile
-    #    dir, so this correctly gets the current profile's skills.
-    primary = hermes_home / "skills"
-    if primary.exists():
-        dirs.append(primary)
+    # 1. Global ~/.hermes/skills/ (always scanned, not profile-relative)
+    global_skills = global_hermes / "skills"
+    if global_skills.exists():
+        dirs.append(global_skills)
 
-    # 2. Configured source dirs (skill-graph's own extra paths)
+    # 2. Hermes Agent built-in skills (global)
+    agent_skills = global_hermes / "hermes-agent" / "skills"
+    if agent_skills.exists():
+        dirs.append(agent_skills)
+
+    # 3. Current profile's skills/ dir (if inside a named profile,
+    #    HERMES_HOME != global_hermes, this picks up profile-specific skills)
+    profile_skills = hermes_home / "skills"
+    if profile_skills.exists() and str(profile_skills) != str(global_skills):
+        dirs.append(profile_skills)
+
+    # 4. Configured source dirs (skill-graph's own extra paths)
     source_dirs = _read_source_dirs_from_config()
     dirs.extend(source_dirs)
 
-    # 3. External skill dirs from Hermes config
+    # 5. External skill dirs from Hermes config
     try:
         from hermes_cli.config import load_config
         config = load_config()
