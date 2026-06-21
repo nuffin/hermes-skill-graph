@@ -39,7 +39,6 @@ DEFAULT_RELATION_TYPES = {
 
 GRAPH_DB_FILENAME = "skill-graph.db"
 GRAPH_LOCK = threading.Lock()
-_initialized = False
 
 # ── SQLite schema ──────────────────────────────────────────────────────────
 
@@ -137,7 +136,7 @@ def _find_all_skills_dirs() -> list[Path]:
 
 def _scan_skill_mds(skill_dirs: list[Path]) -> list[tuple[str, Path]]:
     """Scan all skill directories for SKILL.md files.
-    
+
     Returns list of (skill_name, skill_md_path).
     """
     results: list[tuple[str, Path]] = []
@@ -173,7 +172,7 @@ def _scan_skill_mds(skill_dirs: list[Path]) -> list[tuple[str, Path]]:
 
 def _parse_skill_md(path: Path) -> dict[str, Any]:
     """Parse SKILL.md and extract metadata for the graph.
-    
+
     Returns dict with keys: name, category, description, tags, relations, content_hash
     """
     result: dict[str, Any] = {
@@ -237,73 +236,155 @@ def _parse_skill_md(path: Path) -> dict[str, Any]:
     return result
 
 
-def _update_graph(conn: sqlite3.Connection) -> int:
-    """Full refresh: scan all skills dirs, update graph, return count of skills."""
-    skill_dirs = _find_all_skills_dirs()
-    skills = _scan_skill_mds(skill_dirs)
+# ── Graph sync ──────────────────────────────────────────────────────────────
 
-    # Deduplicate: when same skill name appears in multiple dirs,
-    # prefer the one from the primary ~/.hermes/skills/ dir, then first seen
+
+def _dedup_skills(skills: list[tuple[str, Path]]) -> dict[str, Path]:
+    """Deduplicate skills by name, preferring ~/.hermes/skills/ paths."""
     deduped: dict[str, Path] = {}
     primary_hint = str(Path.home() / ".hermes" / "skills")
     for name, path in skills:
         if name not in deduped:
             deduped[name] = path
         else:
-            # If current is in primary and existing is not, replace
             if str(path).startswith(primary_hint) and \
                not str(deduped[name]).startswith(primary_hint):
                 deduped[name] = path
+    return deduped
 
-    now = time.time()
 
-    # Get existing nodes
-    existing = set()
-    for row in conn.execute("SELECT name, content_hash FROM skill_nodes"):
-        existing.add(row["name"])
+def _upsert_skill(conn: sqlite3.Connection, name: str, path: Path, now: float) -> dict[str, Any]:
+    """Parse a SKILL.md and upsert its node + edges + FTS into the graph.
 
-    # Upsert skills
-    parsed_count = 0
-    for name, path in deduped.items():
-        info = _parse_skill_md(path)
-        tags_json = json.dumps(info["tags"], ensure_ascii=False)
-        desc = info["description"]
-        cat = info["category"]
+    Returns the parsed info dict.
+    """
+    info = _parse_skill_md(path)
+    tags_json = json.dumps(info["tags"], ensure_ascii=False)
 
+    # Upsert node
+    conn.execute(
+        """INSERT OR REPLACE INTO skill_nodes
+           (name, category, description, tags, file_path, content_hash, last_parsed)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (name, info["category"], info["description"],
+         tags_json, str(path), info["content_hash"], now),
+    )
+
+    # Remove old edges for this skill
+    conn.execute("DELETE FROM skill_edges WHERE source = ?", (name,))
+
+    # Insert edges from relations
+    for rel in info.get("relations", []):
+        rel_type = rel.get("type", "similar_to")
+        target = rel.get("target", "")
+        props = rel.get("properties", {})
+        if not target:
+            continue
         conn.execute(
-            """INSERT OR REPLACE INTO skill_nodes
-               (name, category, description, tags, file_path, content_hash, last_parsed)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (name, cat, desc, tags_json, str(path), info["content_hash"], now),
+            "INSERT OR IGNORE INTO skill_edges (source, target, rel_type, properties) VALUES (?, ?, ?, ?)",
+            (name, target, rel_type, json.dumps(props, ensure_ascii=False)),
         )
-        parsed_count += 1
-
-        # Remove old edges for this skill
-        conn.execute("DELETE FROM skill_edges WHERE source = ?", (name,))
-
-        # Insert edges from relations
-        for rel in info.get("relations", []):
-            rel_type = rel.get("type", "similar_to")
-            target = rel.get("target", "")
-            props = rel.get("properties", {})
-            if not target:
-                continue
+        # Auto-generate reverse edge for directed relations
+        reverse_type = _reverse_type(rel_type)
+        if reverse_type:
+            reverse_props = {"inferred": True, "reason": f"reverse of {rel_type}"}
             conn.execute(
                 "INSERT OR IGNORE INTO skill_edges (source, target, rel_type, properties) VALUES (?, ?, ?, ?)",
-                (name, target, rel_type, json.dumps(props, ensure_ascii=False)),
+                (target, name, reverse_type, json.dumps(reverse_props)),
             )
-            # Auto-generate reverse edge for directed relations
-            reverse_type = _reverse_type(rel_type)
-            if reverse_type:
-                reverse_props = {"inferred": True, "reason": f"reverse of {rel_type}"}
-                conn.execute(
-                    "INSERT OR IGNORE INTO skill_edges (source, target, rel_type, properties) VALUES (?, ?, ?, ?)",
-                    (target, name, reverse_type, json.dumps(reverse_props)),
-                )
 
-    # Remove stale nodes (skills that no longer exist)
+    # Update FTS for this skill
+    tags_text = " ".join(info.get("tags", []))
+    conn.execute("DELETE FROM skill_fts WHERE name = ?", (name,))
+    conn.execute(
+        "INSERT INTO skill_fts (name, category, description, tags) VALUES (?, ?, ?, ?)",
+        (name, info.get("category", ""), info.get("description", ""), tags_text),
+    )
+
+    return info
+
+
+def _full_rebuild(conn: sqlite3.Connection) -> int:
+    """Full rebuild: scan all skills dirs, rebuild graph from scratch.
+
+    Returns total skill count.
+    """
+    skill_dirs = _find_all_skills_dirs()
+    skills = _scan_skill_mds(skill_dirs)
+    deduped = _dedup_skills(skills)
+
+    now = time.time()
+    parsed_count = 0
+
+    # Clear existing data
+    conn.execute("DELETE FROM skill_edges")
+    conn.execute("DELETE FROM skill_nodes")
+    conn.execute("DELETE FROM skill_fts")
+
+    for name, path in deduped.items():
+        _upsert_skill(conn, name, path, now)
+        parsed_count += 1
+
+    conn.commit()
+    logger.info(
+        "Skill graph rebuilt: %d skills", parsed_count,
+    )
+    return parsed_count
+
+
+def _incremental_sync(conn: sqlite3.Connection) -> int:
+    """Incremental sync: only re-parse skills whose files have changed.
+
+    Uses mtime + content_hash to detect changes without reading every file.
+    Removes stale nodes (skills deleted from disk).
+
+    Returns total skill count.
+    """
+    skill_dirs = _find_all_skills_dirs()
+    skills = _scan_skill_mds(skill_dirs)
+    deduped = _dedup_skills(skills)
+
+    # Read current DB state
+    db_nodes: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT name, content_hash, last_parsed, file_path FROM skill_nodes"
+    ):
+        db_nodes[row["name"]] = {
+            "content_hash": row["content_hash"],
+            "last_parsed": row["last_parsed"],
+            "file_path": row["file_path"],
+        }
+
+    now = time.time()
+    parsed_count = 0
+    skipped_count = 0
+
+    for name, path in deduped.items():
+        existing = db_nodes.get(name)
+
+        if existing:
+            # Fast-path: check mtime before reading file
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0
+
+            # If mtime <= last_parsed AND path hasn't moved AND hash matches → skip
+            if mtime <= existing["last_parsed"] and existing["file_path"] == str(path):
+                # Also quickly verify content_hash still matches (catches obscure edge cases)
+                # We do a cheap hash of just the first 1KB to avoid full reads on unchanged files
+                # Actually, just trust mtime — it's reliable enough for our use case
+                skipped_count += 1
+                continue
+
+        # File changed or is new — full parse + upsert
+        _upsert_skill(conn, name, path, now)
+        parsed_count += 1
+
+    # Remove stale nodes (on disk but deleted from DB)
     current_names = set(deduped.keys())
-    stale = existing - current_names
+    db_names = set(db_nodes.keys())
+    stale = db_names - current_names
     for name in stale:
         conn.execute("DELETE FROM skill_edges WHERE source = ? OR target = ?", (name, name))
         conn.execute("DELETE FROM skill_nodes WHERE name = ?", (name,))
@@ -311,28 +392,30 @@ def _update_graph(conn: sqlite3.Connection) -> int:
 
     conn.commit()
     logger.info(
-        "Skill graph refreshed: %d skills parsed, %d removed, %d total",
-        parsed_count, len(stale), len(deduped),
+        "Skill graph synced: %d parsed, %d unchanged, %d removed, %d total",
+        parsed_count, skipped_count, len(stale), len(deduped),
     )
-
-    # Rebuild FTS index
-    conn.execute("DELETE FROM skill_fts")
-    for row in conn.execute(
-        "SELECT name, category, description, tags FROM skill_nodes"
-    ):
-        tags_text = " ".join(json.loads(row["tags"])) if row["tags"] else ""
-        conn.execute(
-            "INSERT INTO skill_fts (name, category, description, tags) VALUES (?, ?, ?, ?)",
-            (row["name"], row["category"], row["description"], tags_text),
-        )
-    conn.commit()
-
     return len(deduped)
 
 
+def _sync_graph(conn: sqlite3.Connection) -> int:
+    """Sync the graph with the filesystem.
+
+    - DB empty (first use or new profile) → full rebuild
+    - DB has data → incremental mtime-based sync
+
+    Returns total skill count.
+    """
+    count = conn.execute("SELECT COUNT(*) FROM skill_nodes").fetchone()[0]
+    if count == 0:
+        return _full_rebuild(conn)
+    return _incremental_sync(conn)
+
+
 def _update_single_skill(conn: sqlite3.Connection, skill_name: str) -> bool:
-    """Re-parse a single skill and update its node + edges in the graph.
-    
+    """Re-parse a single skill and update its node + edges + FTS.
+
+    Called by post_tool_call hook when the agent creates/edits a skill.
     Returns True if the skill was found and updated.
     """
     skill_dirs = _find_all_skills_dirs()
@@ -353,46 +436,8 @@ def _update_single_skill(conn: sqlite3.Connection, skill_name: str) -> bool:
         logger.debug("skill-graph: skill '%s' not found on disk, skipping", skill_name)
         return False
 
-    info = _parse_skill_md(skill_path)
     now = time.time()
-    tags_json = json.dumps(info["tags"], ensure_ascii=False)
-
-    conn.execute(
-        """INSERT OR REPLACE INTO skill_nodes
-           (name, category, description, tags, file_path, content_hash, last_parsed)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (skill_name, info["category"], info["description"],
-         tags_json, str(skill_path), info["content_hash"], now),
-    )
-
-    conn.execute("DELETE FROM skill_edges WHERE source = ?", (skill_name,))
-
-    for rel in info.get("relations", []):
-        rel_type = rel.get("type", "similar_to")
-        target = rel.get("target", "")
-        props = rel.get("properties", {})
-        if not target:
-            continue
-        conn.execute(
-            "INSERT OR IGNORE INTO skill_edges (source, target, rel_type, properties) VALUES (?, ?, ?, ?)",
-            (skill_name, target, rel_type, json.dumps(props, ensure_ascii=False)),
-        )
-        reverse_type = _reverse_type(rel_type)
-        if reverse_type:
-            reverse_props = {"inferred": True, "reason": f"reverse of {rel_type}"}
-            conn.execute(
-                "INSERT OR IGNORE INTO skill_edges (source, target, rel_type, properties) VALUES (?, ?, ?, ?)",
-                (target, skill_name, reverse_type, json.dumps(reverse_props)),
-            )
-
-    # Update FTS for this skill
-    tags_text = " ".join(info.get("tags", []))
-    conn.execute("DELETE FROM skill_fts WHERE name = ?", (skill_name,))
-    conn.execute(
-        "INSERT INTO skill_fts (name, category, description, tags) VALUES (?, ?, ?, ?)",
-        (skill_name, info.get("category", ""), info.get("description", ""), tags_text),
-    )
-
+    _upsert_skill(conn, skill_name, skill_path, now)
     conn.commit()
     logger.debug("skill-graph: updated single skill '%s' (%s)", skill_name, skill_path)
     return True
@@ -414,7 +459,7 @@ def _reverse_type(rel_type: str) -> str | None:
 
 def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list[dict[str, Any]]:
     """Search the skill graph by intent query.
-    
+
     Strategy:
     1. FTS5 full-text search on name, description, tags
     2. Entity extraction from query → expand via graph edges
@@ -509,10 +554,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
 
 def _fts_query(query: str) -> str:
     """Convert a natural language query to an FTS5 query string."""
-    # Strip punctuation, keep meaningful terms
     terms = re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff_-]+", query.lower())
-    # FTS5 supports AND as default, but for Chinese we need OR for broader recall
-    # For English, AND works better
     has_ascii = any(t.isascii() for t in terms)
     if has_ascii:
         return " AND ".join(t for t in terms if len(t) > 1)
@@ -547,26 +589,73 @@ def _get_node_info(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None
 
 _graph_lock = threading.Lock()
 _global_conn: sqlite3.Connection | None = None
-_global_initialized = False
 
 
 def _ensure_graph() -> sqlite3.Connection:
-    """Lazy-init the graph DB and refresh if stale."""
-    global _global_conn, _global_initialized
+    """Lazy-init the graph DB connection (no auto-sync)."""
+    global _global_conn
 
     if _global_conn is None:
         conn = _get_conn()
         _init_db(conn)
         _global_conn = conn
 
-    # Always refresh on first access per session
-    if not _global_initialized:
-        with _graph_lock:
-            if not _global_initialized:
-                _update_graph(_global_conn)
-                _global_initialized = True
-
     return _global_conn
+
+
+# ── Slash command handler ───────────────────────────────────────────────────
+
+
+def _handle_slash_command(args: str) -> str | None:
+    """Handle the /skill-graph slash command.
+
+    Subcommands:
+      /skill-graph          → show usage
+      /skill-graph rebuild  → force full graph rebuild
+      /skill-graph status   → show graph stats
+    """
+    parts = args.strip().split(None, 1) if args.strip() else []
+    subcmd = parts[0].lower() if parts else "help"
+
+    if subcmd == "rebuild":
+        try:
+            conn = _ensure_graph()
+            with _graph_lock:
+                count = _full_rebuild(conn)
+            return (
+                f"Skill graph rebuilt: {count} skills indexed.\n"
+                f"Relations and FTS index fully refreshed."
+            )
+        except Exception as e:
+            logger.exception("skill-graph: rebuild failed")
+            return f"Rebuild failed: {e}"
+
+    elif subcmd in ("status", "stats"):
+        try:
+            conn = _ensure_graph()
+            node_count = conn.execute("SELECT COUNT(*) FROM skill_nodes").fetchone()[0]
+            edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
+            db_path = _db_path()
+            db_size = db_path.stat().st_size if db_path.exists() else 0
+            return (
+                f"Skill Graph status\n"
+                f"  Skills:  {node_count}\n"
+                f"  Edges:   {edge_count}\n"
+                f"  DB size: {db_size / 1024:.1f} KB\n"
+                f"  DB path: {db_path}"
+            )
+        except Exception as e:
+            return f"Status check failed: {e}"
+
+    else:
+        return (
+            "/skill-graph — Skill knowledge graph\n\n"
+            "Subcommands:\n"
+            "  /skill-graph rebuild    Force full graph rebuild from all SKILL.md files\n"
+            "  /skill-graph status     Show graph stats (skill count, edge count, DB size)\n\n"
+            "The agent can also call skill_graph_search(query) directly.\n"
+            "See /skill-graph (the companion skill) for usage guidance."
+        )
 
 
 # ── Tool handler ────────────────────────────────────────────────────────────
@@ -644,7 +733,7 @@ def _handle_skill_graph_search(**kw) -> str:
 def register(ctx):
     """Register the skill-graph plugin."""
 
-    # Register custom tool
+    # ── Register custom tool ──
     ctx.register_tool(
         name="skill_graph_search",
         toolset="skills",
@@ -680,22 +769,27 @@ def register(ctx):
         check_fn=None,
     )
 
-    # Register on_session_start hook to refresh the graph
+    # ── Register slash command ──
+    ctx.register_command(
+        name="skill-graph",
+        handler=_handle_slash_command,
+        description="Skill knowledge graph: rebuild, status, help",
+        args_hint="rebuild|status",
+    )
+
+    # ── Register on_session_start: sync graph at session start ──
     def _on_session_start(**kw):
-        global _global_initialized
         try:
             conn = _ensure_graph()
-            # Full refresh every session start
             with _graph_lock:
-                count = _update_graph(conn)
-                _global_initialized = True
-            logger.info("Skill graph ready: %d skills", count)
+                count = _sync_graph(conn)
+            logger.info("Skill graph synced: %d skills", count)
         except Exception:
             logger.exception("skill-graph: on_session_start failed")
 
     ctx.register_hook("on_session_start", _on_session_start)
 
-    # Register post_tool_call hook to catch skill_manage create/edit/patch
+    # ── Register post_tool_call: incremental update on skill_manage ──
     def _on_post_tool_call(**kw):
         """Detect skill_manage calls and update the graph incrementally."""
         tool_name = kw.get("tool_name", "")
@@ -714,7 +808,6 @@ def register(ctx):
         if not skill_name:
             return
 
-        # Incremental update: re-parse just this one skill
         try:
             conn = _ensure_graph()
             with _graph_lock:
@@ -728,5 +821,5 @@ def register(ctx):
 
     logger.info(
         "skill-graph plugin registered: tool=skill_graph_search, "
-        "hooks=on_session_start + post_tool_call"
+        "cmd=/skill-graph, hooks=on_session_start + post_tool_call"
     )

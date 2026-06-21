@@ -25,6 +25,13 @@ description, or when you suspect a flat search would miss relevant skills, use
 - The user's request involves multiple domains (e.g. "deploy and monitor a Python API")
 - You're choosing between alternatives and want to see how they relate
 
+## Slash Commands
+
+The plugin registers ``/skill-graph`` with subcommands:
+
+- ``/skill-graph rebuild`` — Force full graph rebuild (re-scan all SKILL.md)
+- ``/skill-graph status`` — Show graph stats (skill count, edge count, DB size)
+
 ## How to Use
 
 ```python
