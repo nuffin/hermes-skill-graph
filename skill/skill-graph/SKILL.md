@@ -11,12 +11,15 @@ metadata:
       - hermes
       - skills
       - discovery
-      - graph
-      - intent-router
       - 意图路由器
       - routing
       - classification
----
+    relations:
+      - type: complemented_by
+        target: quality-gate
+        properties:
+          reason: Routing + validation complete the pipeline
+          strength: strong
 
 # Skill Graph — Intent Routing + Discovery
 
@@ -72,30 +75,36 @@ domain skill. Search the graph first, then answer following its guidance.
 ## Phase 4: Routing
 
 After classification, search with intent keywords — NOT the user's
-exact words:
+exact words. The graph scores results by FTS5, term matches, and
+relationship traversal, so **provide multiple relevant keywords**
+to increase the chance of matching the right skill:
 
 | User said | Don't search | Search instead |
 |-----------|-------------|----------------|
-| "show the eir project" | "show the eir project" | `skill_graph_search("project management framework overview")` |
-| "what's wrong with this bug" | "what's wrong" | `skill_graph_search("debug python systematic")` |
-| "help design the database" | "help design the database" | `skill_graph_search("data model design naming conventions")` |
+| "show the eir project" | "show the eir project" | `skill_graph_search("project overview structure architecture discovery")` |
+| "what's wrong with this bug" | "what's wrong" | `skill_graph_search("debug root cause analysis investigation")` |
+| "help design the database" | "help design the database" | `skill_graph_search("database schema data model naming conventions")` |
 
 ### Routing table
 
-| User intent | Search query |
-|------------|--------------|
-| View / understand project structure | `skill_graph_search("project management framework overview")` |
-| Create / manage tasks | `skill_graph_search("task management and workflow")` |
-| Git operations | `skill_graph_search("git commit and push workflow")` |
-| Code review | `skill_graph_search("code review pull request")` |
-| Write PRD / requirements | `skill_graph_search("product requirements document writing")` |
-| Debug a program | `skill_graph_search("debug python systematic")` |
-| Design / prototype | `skill_graph_search("design prototype mockup")` |
-| Architecture analysis | `skill_graph_search("architecture discovery reverse engineering")` |
-| Domain research | `skill_graph_search("domain analysis market research")` |
-| Deploy a service | `skill_graph_search("deploy service docker")` |
-| Video production | `skill_graph_search("video production screen recording")` |
-| Database design | `skill_graph_search("data model design naming conventions")` |
+The table below maps common intent types to keyword-rich search queries.
+Add more keywords relevant to the specific context — more terms increase
+the graph's ability to find the right match via its scoring pipeline.
+
+| User intent | Search query (add more context keywords!) |
+|------------|------------------------------------------|
+| View / understand project | `skill_graph_search("project overview structure analysis document")` |
+| Create / manage tasks | `skill_graph_search("task workflow management lifecycle")` |
+| Git operations | `skill_graph_search("git commit push branch workflow")` |
+| Code review | `skill_graph_search("code review static analysis audit quality")` |
+| Write PRD / requirements | `skill_graph_search("product requirements document specification")` |
+| Debug a program | `skill_graph_search("debug root cause analysis investigation")` |
+| Design / prototype | `skill_graph_search("design prototype mockup wireframe")` |
+| Architecture analysis | `skill_graph_search("architecture design analysis discovery")` |
+| Domain research | `skill_graph_search("domain analysis market research feasibility")` |
+| Deploy a service | `skill_graph_search("deploy service server container")` |
+| Video production | `skill_graph_search("video production recording editing")` |
+| Database design | `skill_graph_search("database schema data model naming")` |
 
 ## Slash Commands
 
