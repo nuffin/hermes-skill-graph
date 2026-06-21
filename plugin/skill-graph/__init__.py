@@ -162,11 +162,19 @@ def _find_all_skills_dirs() -> list[Path]:
     if primary.exists():
         dirs.append(primary)
 
-    # 2. Configured source dirs (skill-graph's own extra paths)
+    # 2. Hermes Agent built-in skills (always scanned alongside user dir)
+    #    This gives the graph rich content out of the box without relying
+    #    on external repos.  May be empty if Hermes is installed as a
+    #    system package rather than git-cloned.
+    agent_skills = hermes_home / "hermes-agent" / "skills"
+    if agent_skills.exists():
+        dirs.append(agent_skills)
+
+    # 3. Configured source dirs (skill-graph's own extra paths)
     source_dirs = _read_source_dirs_from_config()
     dirs.extend(source_dirs)
 
-    # 3. External skill dirs from Hermes config
+    # 4. External skill dirs from Hermes config
     try:
         from hermes_cli.config import load_config
         config = load_config()
