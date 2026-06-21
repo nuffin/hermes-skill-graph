@@ -57,7 +57,8 @@ ${C_BOLD}WHAT IT DOES${C_RESET}
     incrementally when Hermes creates/edits skills.
 
 ${C_BOLD}FILES ON DISK${C_RESET}
-    $HERMES_HOME/personal/skill-graph.db   — SQLite graph database (auto-created)
+    $HERMES_HOME/skill-graph.db                       — SQLite graph database (auto-created)
+    $HERMES_HOME/profiles/<name>/skill-graph.db        — per-profile DB (auto-created)
 EOF
 }
 
@@ -138,8 +139,8 @@ do_uninstall() {
         fi
     done
 
-    # Clean personal DB
-    local db_path="$HERMES_HOME/personal/skill-graph.db"
+    # Clean DB
+    local db_path="$HERMES_HOME/skill-graph.db"
     if [ -f "$db_path" ]; then
         warn "Database left in place: $db_path"
         warn "  Remove manually: rm $db_path"

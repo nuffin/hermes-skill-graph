@@ -76,9 +76,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts USING fts5(
 
 
 def _db_path() -> Path:
-    """Return path to graph DB under the active Hermes home."""
+    """Return path to graph DB under the active Hermes home.
+
+    Default profile:  ~/.hermes/skill-graph.db
+    Named profile:    ~/.hermes/profiles/<name>/skill-graph.db
+    """
     hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-    return hermes_home / "personal" / GRAPH_DB_FILENAME
+    return hermes_home / GRAPH_DB_FILENAME
 
 
 def _get_conn() -> sqlite3.Connection:

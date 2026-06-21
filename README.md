@@ -69,7 +69,7 @@ Removes the symlinks but keeps the graph database (`~/.hermes/personal/skill-gra
 |-----------|-------------|---------|
 | Plugin | `~/.hermes/plugins/skill-graph/` | Graph engine, search tool, lifecycle hooks |
 | Skill | `~/.hermes/skills/skill-graph/` | Agent guidance on using the graph |
-| Database | `~/.hermes/personal/skill-graph.db` | SQLite + FTS5 graph (auto-created at runtime) |
+| Database | `~/.hermes/skill-graph.db` (default profile) or `~/.hermes/profiles/<name>/skill-graph.db` | SQLite + FTS5 graph (auto-created at runtime) |
 
 ---
 
@@ -155,7 +155,8 @@ Properties (optional, in `properties` dict):
 
 ### Storage
 
-- **SQLite** with WAL mode at `~/.hermes/personal/skill-graph.db`
+- **SQLite** with WAL mode at `~/.hermes/skill-graph.db` (default profile)
+- **Per-profile**: `~/.hermes/profiles/<name>/skill-graph.db`
 - **FTS5** for full-text search on name, category, description, tags
 - Relational model (3 tables: `skill_nodes`, `skill_edges`, `skill_fts`)
 - Ready for future vector embedding extension (add a `embedding BLOB` column)
