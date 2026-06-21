@@ -601,18 +601,15 @@ SKILL_LOAD_PROMPT = (
 def _ensure_graph() -> sqlite3.Connection:
     """Lazy-init the graph DB connection. Syncs on first access."""
     global _global_conn, _global_synced
-
     if _global_conn is None:
         conn = _get_conn()
         _init_db(conn)
         _global_conn = conn
-
     if not _global_synced:
         with _graph_lock:
             if not _global_synced:
                 _sync_graph(_global_conn)
                 _global_synced = True
-
     return _global_conn
 
 
@@ -622,16 +619,14 @@ def _ensure_graph() -> sqlite3.Connection:
 def _handle_slash_command(args: str) -> str | None:
     parts = args.strip().split(None, 1) if args.strip() else []
     subcmd = parts[0].lower() if parts else "help"
+    rest = parts[1] if len(parts) > 1 else ""
 
     if subcmd == "rebuild":
         try:
             conn = _ensure_graph()
             with _graph_lock:
                 count = _full_rebuild(conn)
-            return (
-                f"Skill graph rebuilt: {count} skills indexed.\n"
-                f"Relations and FTS index fully refreshed."
-            )
+            return f"Skill graph rebuilt: {count} skills indexed."
         except Exception as e:
             logger.exception("skill-graph: rebuild failed")
             return f"Rebuild failed: {e}"
@@ -643,15 +638,12 @@ def _handle_slash_command(args: str) -> str | None:
             edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
             db_path = _db_path()
 
-            # If DB is empty, trigger a sync right here (belt-and-suspenders
-            # for when on_session_start hook doesn't fire)
             if node_count == 0:
                 with _graph_lock:
                     count = _sync_graph(conn)
                 node_count = count
                 edge_count = conn.execute("SELECT COUNT(*) FROM skill_edges").fetchone()[0]
 
-            # Show scanned dirs (use os.walk to follow symlinks)
             scanned = _find_all_skills_dirs()
             dirs_info = []
             for d in scanned:
@@ -677,15 +669,33 @@ def _handle_slash_command(args: str) -> str | None:
         except Exception as e:
             return f"Status check failed: {e}"
 
+    elif subcmd == "search" and rest:
+        try:
+            conn = _ensure_graph()
+            with _graph_lock:
+                results = _search_graph(rest, conn, limit=15)
+            if not results:
+                return f"No skills found for: {rest}"
+            lines = [f"Search results for: {rest}", ""]
+            for r in results:
+                rel = r.get("relevance", "")
+                chain = r.get("relationship_chain", [])
+                extra = f" [{rel}]" if rel else ""
+                if chain:
+                    extra += f"  chain: {' → '.join(chain[:2])}"
+                lines.append(f"  {r['name']:35s}  {r.get('description', '')[:55]}{extra}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.exception("skill-graph: search failed")
+            return f"Search failed: {e}"
+
     else:
         return (
             "/skill-graph — Skill knowledge graph\n\n"
             "Subcommands:\n"
-            "  /skill-graph rebuild    Force full graph rebuild from all SKILL.md files\n"
-            "  /skill-graph status     Show graph stats (skill count, edge count, DB size)\n\n"
-            "Tools:\n"
-            "  skill_graph_search()    Find skills by intent\n"
-            "  skill_load()            Load a skill's full content\n"
+            "  /skill-graph search <query>   Search skills by intent\n"
+            "  /skill-graph rebuild          Force full graph rebuild\n"
+            "  /skill-graph status           Show graph stats\n"
         )
 
 
