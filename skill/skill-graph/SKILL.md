@@ -40,6 +40,21 @@ Never use find/ls/cat before step 4.
 Never plan from scratch — the graph has the skills you need.
 ```
 
+## Loader Protocol
+
+After loading a skill via `skill_load()`, verify it fits the current task:
+
+- **Scope mismatch?** If the loaded skill is a pipeline / multi-step
+  wrapper but the task is a single simple operation — go back and
+  search again with narrower terms.
+- **Description mismatch?** If the skill's description clearly doesn't
+  match the task — call `skill_graph_search()` again with different
+  keywords.
+- **Good match?** Continue with execution.
+
+Pipelines should declare their scope explicitly in the description
+so the agent can judge fit before executing.
+
 ## Phase 1: Input Classification
 
 | Type | Description | Initial route |
