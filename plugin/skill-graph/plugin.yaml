@@ -1,0 +1,7 @@
+name: skill-graph
+version: 1.0.0
+description: "Knowledge graph for skills discovery — parses SKILL.md relations, builds a SQLite graph, and exposes skill_graph_search() tool for intent→skills traversal."
+author: "Hauzer S. Lee"
+hooks:
+  - on_session_start
+  - post_tool_call
