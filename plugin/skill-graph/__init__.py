@@ -624,6 +624,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             props = json.loads(row["properties"]) if row["properties"] else {}
             rel_type = row["rel_type"]
             reason = props.get("reason", f"via {rel_type}")
+            _score = 0.8 if rel_type == "supersedes" else 0.5
             results[target] = {
                 "name": target,
                 "category": row["category"] or "",
@@ -632,7 +633,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                 "file_path": "",
                 "relevance": "expansion",
                 "relationship_chain": [f"{current} --({rel_type})--> {target}: {reason}"],
-                "score": 0.5,
+                "score": _score,
             }
             expansion_queue.append(target)
 
