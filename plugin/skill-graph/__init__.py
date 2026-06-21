@@ -1136,6 +1136,14 @@ def register(ctx):
         args_hint="rebuild|status",
     )
 
+    # ── Alias: /sg → same handler as /skill-graph ──
+    ctx.register_command(
+        name="sg",
+        handler=_handle_slash_command,
+        description="Alias for /skill-graph",
+        args_hint="rebuild|status",
+    )
+
     # ── Hook: on_session_start — ensure DB ──
     def _on_session_start(**kw):
         try:
