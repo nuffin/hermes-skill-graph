@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS skill_term_stats (
     search_count INTEGER DEFAULT 1,
     load_count   INTEGER DEFAULT 0,
     success_count INTEGER DEFAULT 0,
+    last_searched TEXT,
+    last_loaded   TEXT,
     PRIMARY KEY (skill_name, term)
 );
 """
@@ -182,10 +184,7 @@ def _find_all_skills_dirs() -> list[Path]:
     if profile_skills.exists() and str(profile_skills) != str(global_skills):
         dirs.append(profile_skills)
 
-    # 4. Agent-created skills (hardcoded default for standalone project)
-    #    Hermes skill_manage writes to ~/.hermes/skills/; after creation the
-    #    agent moves them here so they stay graph-discoverable without bloating
-    #    the system prompt index.
+    # 4. Hermes-agent-created skills (discoverable via graph, not in prompt)
     agent_created_dir = hermes_home / "skill-graph" / "agent-created"
     if agent_created_dir.exists():
         dirs.append(agent_created_dir)
@@ -449,6 +448,31 @@ def _upsert_skill(conn: sqlite3.Connection, name: str, path: Path, now: float) -
             (term_text, name, strength, source),
         )
 
+    # Hook: run optional index_hook.py in the skill directory.
+    # The hook receives (conn, skill_dir_path, skill_name, info, content) and
+    # can either write directly to conn (old style) or return a dict with
+    #       "terms": [(term, strength, source), ...}
+    # for skill-graph to index centrally.
+    _hook_path = path.parent / "index_hook.py"
+    if _hook_path.is_file():
+        try:
+            import importlib.util as _iu
+            _spec = _iu.spec_from_file_location(f"_graph_hook_{name}", str(_hook_path))
+            if _spec and _spec.loader:
+                _mod = _iu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                if hasattr(_mod, "on_graph_index"):
+                    _hook_content = path.read_text(encoding="utf-8", errors="replace")
+                    _result = _mod.on_graph_index(conn, path.parent, name, info, _hook_content)
+                    if isinstance(_result, dict):
+                        for _t, _s, _src in _result.get("terms", []):
+                            conn.execute(
+                                "INSERT OR IGNORE INTO skill_terms (term, skill_name, strength, source) VALUES (?, ?, ?, ?)",
+                                (_t.lower(), name, _s, _src),
+                            )
+        except Exception:
+            logger.exception("skill-graph: index_hook failed for '%s'", name)
+
     return info
 
 
@@ -648,7 +672,9 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             }
             expansion_queue.append(target)
 
-    # Phase 3: Tag match (existing)
+    # Phase 3: Tag match (existing) — uses its own dedup set so it doesn't
+    # block Phase 4 from finding higher-scoring term matches.
+    _tag_seen: set[str] = set()
     terms = _extract_terms(query)
     for term in terms:
         cursor = conn.execute(
@@ -656,8 +682,8 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             (json.dumps(term),),
         )
         for row in cursor:
-            if row["name"] not in seen:
-                seen.add(row["name"])
+            if row["name"] not in _tag_seen:
+                _tag_seen.add(row["name"])
                 info = _get_node_info(conn, row["name"])
                 if info:
                     info["relevance"] = "tag_match"
@@ -690,6 +716,16 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             )
         for row in cursor:
             sname = row["skill_name"]
+            _term_score = 0.8 * row["strength"]
+            if sname in results:
+                # Don't overwrite — take the higher score
+                if results[sname]["score"] < _term_score:
+                    results[sname]["score"] = _term_score
+                    results[sname]["relevance"] = "term_match"
+                    results[sname]["relationship_chain"] = [
+                        f"term[{term}] → {sname} (strength={row['strength']}, source={row['source']})"
+                    ]
+                continue
             seen.add(sname)
             results[sname] = {
                 "name": sname,
@@ -703,8 +739,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             }
 
     # Phase 5: Term-based scoring boost + search stats
-    # Apply per-(skill, term) load-ratio boost from skill_term_stats.
-    # A skill that gets loaded more often for a given term ranks higher.
+    # Uses per-(skill, term) stats with confidence-weighted S-curve.
     for sname, r in results.items():
         matched_terms = [t for t in terms if t.lower() in (r.get("name", "") + r.get("description", "") + str(r.get("tags", ""))).lower()]
         if matched_terms:
@@ -718,7 +753,6 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                     )
                 except Exception:
                     pass
-            # Compute average load ratio for matched terms
             try:
                 rows = conn.execute(
                     """SELECT term, load_count, search_count, success_count FROM skill_term_stats
@@ -734,7 +768,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                     ) / len(rows)
                     _confidence = 1 - _m.pow(0.5, sum(r["search_count"] for r in rows) / max(len(rows), 1) / 5)
                     _adj = (_avg_eff - 0.5) * 2
-                    _tanh = _adj / (1 + abs(_adj) * 0.5)
+                    _tanh = _adj / (1 + abs(_adj) * 0.5)  # tanh approximation
                     r["score"] *= (1.0 + 0.1 * _tanh * _confidence)
             except Exception:
                 pass
@@ -745,12 +779,25 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
 
 
 def _fts_query(query: str) -> str:
-    """Convert a natural language query to an FTS5 query string."""
+    """Convert a natural language query to an FTS5 query string.
+
+    For ASCII-heavy queries, builds an AND query from multi-char terms.
+    For Chinese-heavy queries (single-char tokens from unicode61), returns
+    empty so _search_graph falls through to term-table matching (Phase 4).
+    """
     terms = re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff_-]+", query.lower())
-    has_ascii = any(t.isascii() for t in terms)
+    # Split Chinese multi-char terms into individual characters for FTS5
+    # compatibility, since unicode61 tokenizes each CJK char separately.
+    flat: list[str] = []
+    for t in terms:
+        if re.match(r"^[\u4e00-\u9fff]+$", t) and len(t) > 1:
+            flat.extend(list(t))  # each CJK char is its own token
+        else:
+            flat.append(t)
+    has_ascii = any(t.isascii() for t in flat)
     if has_ascii:
-        return " AND ".join(t for t in terms if len(t) > 1)
-    return " OR ".join(t for t in terms if len(t) > 1) if terms else ""
+        return " AND ".join(t for t in flat if len(t) > 1)
+    return " OR ".join(t for t in flat if len(t) > 1) if flat else ""
 
 
 def _extract_terms(query: str) -> list[str]:
@@ -784,22 +831,6 @@ _global_conn: sqlite3.Connection | None = None
 _global_synced = False
 
 
-
-def _migrate_db(conn):
-    try:
-        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN success_count INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_searched TEXT")
-    except:
-        pass
-    try:
-        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_loaded TEXT")
-    except:
-        pass
-
-
 def _ensure_graph() -> sqlite3.Connection:
     """Lazy-init the graph DB connection. Syncs on first access."""
     global _global_conn, _global_synced
@@ -816,9 +847,64 @@ def _ensure_graph() -> sqlite3.Connection:
     return _global_conn
 
 
+# ── Schema migration helper ──────────────────────────────────────────────────
+
+def _migrate_db(conn: sqlite3.Connection) -> None:
+    """Apply schema changes that can't be done via CREATE TABLE IF NOT EXISTS."""
+    # v2: add success_count column
+    try:
+        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN success_count INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_searched TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_loaded TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+
 # ── Slash command handler ───────────────────────────────────────────────────
 
 
+def _format_edges(skill_name: str) -> str:
+    """Query and format graph edges only."""
+    try:
+        conn = _ensure_graph()
+        rows = conn.execute(
+            """SELECT source, target, rel_type, properties FROM skill_edges
+               WHERE source = ? OR target = ?
+               ORDER BY rel_type, source""",
+            (skill_name, skill_name),
+        ).fetchall()
+        if not rows:
+            return ""
+        seen: set[tuple[str, str, str]] = set()
+        parts = []
+        for src, tgt, rel, props in rows:
+            key = (src, tgt, rel)
+            if key in seen:
+                continue
+            seen.add(key)
+            arrow = f"  {src} ──({rel})──> {tgt}"
+            reason = ""
+            if isinstance(props, str) and props:
+                import json as _j
+                try:
+                    reason = _j.loads(props).get("reason", "")
+                except Exception:
+                    reason = props[:40]
+            elif isinstance(props, dict):
+                reason = props.get("reason", "")
+            if reason:
+                parts.append(f"{arrow:55s} {reason[:50]}")
+            else:
+                parts.append(arrow)
+        return "Edges:\n" + "\n".join(parts) + "\n"
+    except Exception:
+        return ""
 
 
 def _format_terms(skill_name: str) -> str:
@@ -826,6 +912,8 @@ def _format_terms(skill_name: str) -> str:
     try:
         conn = _ensure_graph()
         parts = []
+
+        # Skill's own terms
         terms = conn.execute(
             "SELECT t.term, t.strength, t.source, "
             "COALESCE(s.search_count,0) AS sc, COALESCE(s.load_count,0) AS lc, "
@@ -840,9 +928,11 @@ def _format_terms(skill_name: str) -> str:
             for t in terms:
                 stats = f"s={t['sc']}/l={t['lc']}/ok={t['suc']}"
                 term_lines.append(
-                    f"    {skill_name} --({t['source']})--> {t['term']}  [{stats}]"
+                    f"    {skill_name} ──({t['source']})──> {t['term']}  [{stats}]"
                 )
             parts.append("\n".join(term_lines))
+
+        # Reverse lookup
         rev = conn.execute(
             "SELECT t.skill_name, t.strength, t.source, "
             "COALESCE(s.search_count,0) AS sc, COALESCE(s.load_count,0) AS lc, "
@@ -855,8 +945,9 @@ def _format_terms(skill_name: str) -> str:
         if rev:
             rev_lines = ["", "  Skills with this term:"]
             for sn, s, src, sc, lc, suc in rev:
-                rev_lines.append(f"    {sn:40s} --({src})--> {skill_name}  [s={sc}/l={lc}/ok={suc}]")
+                rev_lines.append(f"    {sn:40s} ──({src})──> {skill_name}  [s={sc}/l={lc}/ok={suc}]")
             parts.append("\n".join(rev_lines))
+
         return "\n".join(parts) if parts else ""
     except Exception:
         return ""
@@ -894,10 +985,10 @@ def _handle_slash_command(args: str) -> str | None:
         except Exception as e:
             return f"Load failed: {e}"
 
-    elif subcmd in ("show", "detail", "info"):
-        """Show skill metadata, edges, and term associations."""
+    elif subcmd == "show":
+        """Show skill metadata and term associations."""
         if not rest:
-            return "Usage: /skill-graph show|detail|info <skill-name>"
+            return "Usage: /skill-graph show <skill-name>"
         try:
             conn = _ensure_graph()
             node = conn.execute(
@@ -905,14 +996,67 @@ def _handle_slash_command(args: str) -> str | None:
                 (rest,),
             ).fetchone()
             if not node:
-                return f"Not found: {rest}  (try /sg list to see available skills)"
+                return f"Not found: {rest}  (try /sg list)"
             return "\n".join([
                 f"Node: {node['name']}",
                 f"  Category:    {node['category'] or ''}",
                 f"  Description: {node['description'] or ''}",
                 f"  Tags:        {node['tags'] or ''}",
                 f"  Path:        {node['file_path'] or ''}",
-            ]) + _format_edges(rest)
+            ]) + _format_terms(rest)
+        except Exception as e:
+            return f"Show failed: {e}"
+
+    elif subcmd in ("relations", "rels"):
+        """Show graph edges with counts and boost."""
+        if not rest:
+            return "Usage: /skill-graph relations <skill-name>"
+        try:
+            return _format_edges(rest)
+        except Exception as e:
+            return f"Relations failed: {e}"
+
+    elif subcmd == "all":
+        """Show everything: node info + edges + terms."""
+        if not rest:
+            return "Usage: /skill-graph all <skill-name>"
+        try:
+            conn = _ensure_graph()
+            node = conn.execute(
+                "SELECT name, category, description, tags, file_path FROM skill_nodes WHERE name = ?",
+                (rest,),
+            ).fetchone()
+            if not node:
+                return f"Not found: {rest}  (try /sg list)"
+            return "\n".join([
+                f"Node: {node['name']}",
+                f"  Category:    {node['category'] or ''}",
+                f"  Description: {node['description'] or ''}",
+                f"  Tags:        {node['tags'] or ''}",
+                f"  Path:        {node['file_path'] or ''}",
+            ]) + "\n" + _format_edges(rest) + _format_terms(rest)
+        except Exception as e:
+            return f"All failed: {e}"
+
+    elif subcmd == "info":
+        """Show all info: metadata + edges + terms."""
+        if not rest:
+            return "Usage: /skill-graph detail|info <skill-name>"
+        try:
+            conn = _ensure_graph()
+            node = conn.execute(
+                "SELECT name, category, description, tags, file_path FROM skill_nodes WHERE name = ?",
+                (rest,),
+            ).fetchone()
+            if not node:
+                return f"Not found: {rest}  (try /sg list)"
+            return "\n".join([
+                f"Node: {node['name']}",
+                f"  Category:    {node['category'] or ''}",
+                f"  Description: {node['description'] or ''}",
+                f"  Tags:        {node['tags'] or ''}",
+                f"  Path:        {node['file_path'] or ''}",
+            ]) + _format_edges(rest) + _format_terms(rest)
         except Exception as e:
             return f"Show failed: {e}"
 
@@ -1028,6 +1172,7 @@ def _handle_slash_command(args: str) -> str | None:
                     name = r["name"]
                     score = r["score"]
                     rel = r.get("relevance", "?")
+                    # Query term stats for this skill
                     stats_rows = conn.execute(
                         "SELECT term, load_count, search_count FROM skill_term_stats WHERE skill_name = ?",
                         (name,),
@@ -1039,7 +1184,9 @@ def _handle_slash_command(args: str) -> str | None:
                         )
                     else:
                         stats_line = "(no stats)"
-                    lines.append(f"  {name:40s} score={score:.4f}  [{rel}]")
+                    lines.append(
+                        f"  {name:40s} score={score:.4f}  [{rel}]"
+                    )
                     lines.append(f"  {'':40s}  stats: {stats_line}")
                 lines.append(f"\n{len(results)} results shown")
                 return "\n".join(lines)
@@ -1051,9 +1198,11 @@ def _handle_slash_command(args: str) -> str | None:
             "/skill-graph — Skill knowledge graph\n\n"
             "Subcommands:\n"
             "  /skill-graph search <query>   Search skills by intent\n"
-            "  /skill-graph load <name>      Load and display skill details\n"
-            "  /skill-graph score <query>    Show scoring breakdown with term stats\n"
+            "  /skill-graph load <name>      Load skill content (for agent use)\n"
+            "  /skill-graph info <name>      Show metadata and terms with stats\n"
+            "  /skill-graph relations|rels <name> Show graph edges\n"
             "  /skill-graph all <name>        Show all metadata, edges, and terms\n"
+            "  /skill-graph score <query>    Show scoring breakdown with term stats\n"
             "  /skill-graph list             List all skills in graph\n"
             "  /skill-graph config           Show configuration (paths, DB)\n"
             "  /skill-graph status           Show graph stats\n"
@@ -1264,6 +1413,40 @@ def register(ctx):
         args_hint="rebuild|status",
     )
 
+    # ── Hook: pre_tool_call — block find/read_file/recall if graph not searched ──
+    _gated_tools = frozenset({"find", "read_file", "session_search"})
+    _graph_searched_turn: dict[str, bool] = {}  # turn_id → searched
+
+    def _on_pre_tool_call(tool_name: str, args: dict | None = None, **kw: Any) -> dict | str | None:
+        nonlocal _graph_searched_turn
+        turn_id = kw.get("turn_id", "")
+        if not turn_id:
+            return None
+
+        # Turn boundary: reset flag for new turns
+        if turn_id not in _graph_searched_turn:
+            _graph_searched_turn.clear()
+            _graph_searched_turn[turn_id] = False
+
+        # If this IS skill_graph_search, mark it and allow
+        if tool_name == "skill_graph_search":
+            _graph_searched_turn[turn_id] = True
+            return None
+
+        # Check gating: skill-graph mode + restricted tool + not yet searched
+        if (
+            tool_name in _gated_tools
+            and not _graph_searched_turn.get(turn_id, False)
+        ):
+            return {"action": "block", "message":
+                f"Tool '{tool_name}' is blocked until you call "
+                f"skill_graph_search() first. This profile requires graph "
+                f"discovery before filesystem or session searches."
+            }
+        return None
+
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+
     # ── Hook: on_session_start — ensure DB ──
     def _on_session_start(**kw):
         try:
@@ -1274,9 +1457,34 @@ def register(ctx):
 
     ctx.register_hook("on_session_start", _on_session_start)
 
-    # ── Hook: post_tool_call — incremental update on skill_manage ──
+    # ── Hook: post_tool_call — skill_manage sync + load success tracking ──
+    _last_loaded_skill: str | None = None
+
     def _on_post_tool_call(**kw):
+        nonlocal _last_loaded_skill
         tool_name = kw.get("tool_name", "")
+
+        # Track skill_load → when quality-gate loads, mark the previous skill as successful
+        if tool_name == "skill_load":
+            skill_name = (kw.get("args", {}) or {}).get("name", "") or ""
+            if not skill_name:
+                return
+            if skill_name == "quality-gate" and _last_loaded_skill:
+                try:
+                    conn = _get_conn()
+                    conn.execute(
+                        "UPDATE skill_term_stats SET success_count = success_count + 1 WHERE skill_name = ?",
+                        (_last_loaded_skill,),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+                _last_loaded_skill = None
+            else:
+                _last_loaded_skill = skill_name
+            return
+
+        # Handle skill_manage → update graph
         if tool_name != "skill_manage":
             return
         args = kw.get("args", {})
@@ -1301,5 +1509,5 @@ def register(ctx):
 
     logger.info(
         "skill-graph plugin registered: tools=skill_graph_search+skill_load, "
-        "cmd=/skill-graph, hooks=on_session_start+post_tool_call"
+        "cmd=/skill-graph, hooks=on_session_start+post_tool_call+pre_tool_call"
     )
