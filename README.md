@@ -220,6 +220,8 @@ hermes-skill-graph/
 │   │   └── SKILL.md                   # Agent companion skill
 │   └── intent-router/
 │       └── SKILL.md                   # Intent classification + routing
+├── templates/
+│   └── SOUL.md                       # Profile personality template for graph-discovery setups
 └── docs/
     ├── relations-format.md            # Full relations field spec
     └── skill-graph.md                 # Full usage documentation
