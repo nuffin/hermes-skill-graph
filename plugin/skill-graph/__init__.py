@@ -820,6 +820,48 @@ def _ensure_graph() -> sqlite3.Connection:
 
 
 
+
+def _format_terms(skill_name: str) -> str:
+    """Query and format term associations with inline stats."""
+    try:
+        conn = _ensure_graph()
+        parts = []
+        terms = conn.execute(
+            "SELECT t.term, t.strength, t.source, "
+            "COALESCE(s.search_count,0) AS sc, COALESCE(s.load_count,0) AS lc, "
+            "COALESCE(s.success_count,0) AS suc "
+            "FROM skill_terms t "
+            "LEFT JOIN skill_term_stats s ON t.skill_name = s.skill_name AND t.term = s.term "
+            "WHERE t.skill_name = ? ORDER BY t.strength DESC, t.source",
+            (skill_name,),
+        ).fetchall()
+        if terms:
+            term_lines = ["", "  Terms:"]
+            for t in terms:
+                stats = f"s={t['sc']}/l={t['lc']}/ok={t['suc']}"
+                term_lines.append(
+                    f"    {skill_name} --({t['source']})--> {t['term']}  [{stats}]"
+                )
+            parts.append("\n".join(term_lines))
+        rev = conn.execute(
+            "SELECT t.skill_name, t.strength, t.source, "
+            "COALESCE(s.search_count,0) AS sc, COALESCE(s.load_count,0) AS lc, "
+            "COALESCE(s.success_count,0) AS suc "
+            "FROM skill_terms t "
+            "LEFT JOIN skill_term_stats s ON t.skill_name = s.skill_name AND t.term = s.term "
+            "WHERE t.term = ? ORDER BY t.strength DESC",
+            (skill_name,),
+        ).fetchall()
+        if rev:
+            rev_lines = ["", "  Skills with this term:"]
+            for sn, s, src, sc, lc, suc in rev:
+                rev_lines.append(f"    {sn:40s} --({src})--> {skill_name}  [s={sc}/l={lc}/ok={suc}]")
+            parts.append("\n".join(rev_lines))
+        return "\n".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
 def _handle_slash_command(args: str) -> str | None:
     parts = args.strip().split(None, 1) if args.strip() else []
     subcmd = parts[0].lower() if parts else "help"
