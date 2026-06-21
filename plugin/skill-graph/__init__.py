@@ -798,6 +798,27 @@ def _handle_slash_command(args: str) -> str | None:
             logger.exception("skill-graph: rebuild failed")
             return f"Rebuild failed: {e}"
 
+    elif subcmd == "load":
+        """Directly load and display a skill's content."""
+        if not rest:
+            return "Usage: /skill-graph load <skill-name>"
+        try:
+            result = _handle_skill_load({"name": rest})
+            data = json.loads(result)
+            if not data.get("success"):
+                return f"Not found: {rest}"
+            return "\n".join([
+                f"Skill: {data['name']}",
+                f"  Category:    {data.get('category', '')}",
+                f"  Description: {data.get('description', '')[:120]}",
+                f"  Tags:        {', '.join(data.get('tags', [])[:6])}",
+                f"  Path:        {data.get('file_path', '')}",
+                f"  Relations:   {len(data.get('relations', []))} defined",
+                f"  Content:     {len(data.get('content', ''))} chars",
+            ])
+        except Exception as e:
+            return f"Load failed: {e}"
+
     elif subcmd in ("status", "stats"):
         try:
             conn = _ensure_graph()
@@ -933,6 +954,7 @@ def _handle_slash_command(args: str) -> str | None:
             "/skill-graph — Skill knowledge graph\n\n"
             "Subcommands:\n"
             "  /skill-graph search <query>   Search skills by intent\n"
+            "  /skill-graph load <name>      Load and display skill details\n"
             "  /skill-graph score <query>    Show scoring breakdown with term stats\n"
             "  /skill-graph list             List all skills in graph\n"
             "  /skill-graph config           Show configuration (paths, DB)\n"
