@@ -95,13 +95,9 @@ CREATE INDEX IF NOT EXISTS idx_terms_skill ON skill_terms(skill_name);
 
 
 def _db_path() -> Path:
-    """Return path to graph DB under the active Hermes home.
-
-    Default profile:  ~/.hermes/skill-graph.db
-    Named profile:    ~/.hermes/profiles/<name>/skill-graph.db
-    """
+    """Return path to graph DB under the active Hermes home."""
     hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-    return hermes_home / GRAPH_DB_FILENAME
+    return hermes_home / "personal" / GRAPH_DB_FILENAME
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -162,19 +158,11 @@ def _find_all_skills_dirs() -> list[Path]:
     if primary.exists():
         dirs.append(primary)
 
-    # 2. Hermes Agent built-in skills (always scanned alongside user dir)
-    #    This gives the graph rich content out of the box without relying
-    #    on external repos.  May be empty if Hermes is installed as a
-    #    system package rather than git-cloned.
-    agent_skills = hermes_home / "hermes-agent" / "skills"
-    if agent_skills.exists():
-        dirs.append(agent_skills)
-
-    # 3. Configured source dirs (skill-graph's own extra paths)
+    # 2. Configured source dirs (skill-graph's own extra paths)
     source_dirs = _read_source_dirs_from_config()
     dirs.extend(source_dirs)
 
-    # 4. External skill dirs from Hermes config
+    # 3. External skill dirs from Hermes config
     try:
         from hermes_cli.config import load_config
         config = load_config()
@@ -805,13 +793,54 @@ def _handle_slash_command(args: str) -> str | None:
             logger.exception("skill-graph: search failed")
             return f"Search failed: {e}"
 
+    elif subcmd == "list":
+        try:
+            conn = _ensure_graph()
+            rows = conn.execute(
+                "SELECT name, description, category FROM skill_nodes ORDER BY name"
+            ).fetchall()
+            if not rows:
+                return "No skills in graph."
+            lines = [f"Skills in graph ({len(rows)}):", ""]
+            for r in rows:
+                desc = (r["description"] or "")[:60]
+                lines.append(f"  {r['name']:35s}  [{r['category']}]  {desc}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"List failed: {e}"
+
+    elif subcmd == "config":
+        try:
+            conn = _ensure_graph()
+            db_path = _db_path()
+            scanned = _find_all_skills_dirs()
+            cfg_dirs = _read_source_dirs_from_config()
+            skill_count = conn.execute("SELECT COUNT(*) FROM skill_nodes").fetchone()[0]
+            db_size = db_path.stat().st_size if db_path.exists() else 0
+            lines = [
+                "Skill Graph configuration",
+                f"  DB path:     {db_path}",
+                f"  DB size:     {db_size / 1024:.1f} KB",
+                f"  Skills:      {skill_count}",
+                f"  Source dirs (config): {cfg_dirs}" if cfg_dirs else "  Source dirs (config): (none)",
+                "  Scanned dirs:",
+            ]
+            for d in scanned:
+                cnt = len(list(d.rglob("SKILL.md"))) if d.exists() else 0
+                lines.append(f"    {d}  ({cnt} SKILL.md)")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Config failed: {e}"
+
     else:
         return (
             "/skill-graph — Skill knowledge graph\n\n"
             "Subcommands:\n"
             "  /skill-graph search <query>   Search skills by intent\n"
-            "  /skill-graph rebuild          Force full graph rebuild\n"
+            "  /skill-graph list             List all skills in graph\n"
+            "  /skill-graph config           Show configuration (paths, DB)\n"
             "  /skill-graph status           Show graph stats\n"
+            "  /skill-graph rebuild          Force full graph rebuild\n"
         )
 
 
