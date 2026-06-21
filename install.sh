@@ -44,13 +44,16 @@ show_help() {
 ${C_BOLD}hermes-skill-graph${C_RESET} — Install knowledge-graph skill discovery for Hermes Agent
 
 ${C_BOLD}USAGE${C_RESET}
-    bash install.sh              Install (symlink) plugin + skill
-    bash install.sh --uninstall  Remove symlinks (keep DB)
+    bash install.sh              Install (copy files into Hermes)
+    bash install.sh --uninstall  Remove installed files
     bash install.sh --help       This message
 
 ${C_BOLD}WHAT IT DOES${C_RESET}
-    Links plugin/skill-graph/  →  \$HERMES_HOME/plugins/skill-graph/
-    Links skill/skill-graph/   →  \$HERMES_HOME/skills/skill-graph/
+    Copies plugin/skill-graph/  →  \$HERMES_HOME/plugins/skill-graph/
+    Copies skill/skill-graph/   →  \$HERMES_HOME/skills/skill-graph/
+
+    Use --symlink during development to link instead of copy
+    (so changes to the repo are reflected immediately).
 
     After install, restart Hermes (/reset or exit+relaunch).
     The plugin builds the graph on session start and keeps it updated
@@ -101,13 +104,12 @@ do_install() {
         fi
     done
 
-    # Symlink plugin
-    ln -sfn "$PLUGIN_SRC" "$PLUGIN_TARGET"
-    ok "Plugin linked: $PLUGIN_TARGET → $PLUGIN_SRC"
+    # Copy plugin (use --symlink for development)
+    cp -r "$PLUGIN_SRC" "$PLUGIN_TARGET"
+    ok "Plugin installed: $PLUGIN_TARGET"
 
-    # Symlink skill
-    ln -sfn "$SKILL_SRC" "$SKILL_TARGET"
-    ok "Skill linked:  $SKILL_TARGET → $SKILL_SRC"
+    # Copy skill (use --symlink for development)
+    cp -r "$SKILL_SRC" "$SKILL_TARGET"
 
     echo ""
     echo -e "  ${C_BOLD}${C_GREEN}Install complete!${C_RESET}"
@@ -158,6 +160,16 @@ do_uninstall() {
 
 # ── Main ────────────────────────────────────────────────────────────────────
 case "${1:-}" in
+    --symlink|-s)
+        # Symlink mode for development (changes reflect immediately)
+        mkdir -p "$HERMES_HOME/plugins" "$HERMES_HOME/skills"
+        for target in "$PLUGIN_TARGET" "$SKILL_TARGET"; do
+            [ -e "$target" ] && rm -rf "$target"
+        done
+        ln -sfn "$PLUGIN_SRC" "$PLUGIN_TARGET"
+        ln -sfn "$SKILL_SRC" "$SKILL_TARGET"
+        ok "Symlinked plugin + skill (development mode)"
+        ;;
     --uninstall|-u) do_uninstall ;;
     --help|-h)      show_help ;;
     *)              do_install ;;
