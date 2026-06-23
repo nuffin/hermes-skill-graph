@@ -993,22 +993,24 @@ def _handle_slash_command(args: str) -> str | None:
             logger.exception("skill-graph: rebuild failed")
             return f"Rebuild failed: {e}"
 
-    elif subcmd == "load":
-        """Load a skill and return its content (agent-facing)."""
+    elif subcmd == "show":
+        """Show full skill content (preview)."""
         if not rest:
-            return "Usage: /skill-graph load <skill-name>"
+            return "Usage: /skill-graph show <skill-name>"
         try:
             result = _handle_skill_load({"name": rest})
             data = json.loads(result)
             if not data.get("success"):
                 return f"Not found: {rest}"
-            content_chars = len(data.get("content", ""))
+            content = data.get("content", "")
             return (
-                f"Loaded: {data['name']} ({content_chars} chars)\n"
-                f"{data.get('content', '')[:300]}..."
+                f"Skill: {data['name']} ({len(content)} chars)\n"
+                f"  Description: {data.get('description', '')}\n"
+                f"  Category:    {data.get('category', '')}\n"
+                f"\n{content[:2000]}"
             )
         except Exception as e:
-            return f"Load failed: {e}"
+            return f"Show failed: {e}"
 
     elif subcmd == "info":
         """Show skill metadata only."""
@@ -1203,7 +1205,7 @@ def _handle_slash_command(args: str) -> str | None:
             "/skill-graph — Skill knowledge graph\n\n"
             "Subcommands:\n"
             "  /skill-graph search <query>   Search skills by intent\n"
-            "  /skill-graph load <name>      Load skill content (for agent use)\n"
+            "  /skill-graph show <name>      Show full skill content (preview)\n"
             "  /skill-graph info <name>      Show skill metadata\n"
             "  /skill-graph terms <name>     Show term associations with stats\n"
             "  /skill-graph score <query>    Show scoring breakdown with term stats\n"
@@ -1461,7 +1463,9 @@ def register(ctx):
 
     ctx.register_hook("on_session_start", _on_session_start)
 
-    # ── Register proxy commands from graph-discovered skills ──
+        # ── Register proxy commands from graph-discovered skills ──
+    _main_skills_dir = str((Path.home() / ".hermes" / "skills").resolve())
+
     def _register_graph_commands():
         """Scan all skills' SKILL.md frontmatter for commands: and register proxy handlers."""
         try:
@@ -1470,6 +1474,20 @@ def register(ctx):
             deduped = _dedup_skills(skills)
             _registered = 0
             for _name, _path in deduped.items():
+                _path_str = str(_path.resolve())
+                _is_in_main_dir = _path_str.startswith(_main_skills_dir)
+                # Register /<skill_name> ONLY for skills outside the main skills dir.
+                # Skills in ~/.hermes/skills/ are already handled natively by Hermes'
+                # scan_skill_commands() — a plugin proxy would block the native handler
+                # that loads SKILL.md as instructions and continues the conversation.
+                if not _is_in_main_dir:
+                    ctx.register_command(
+                        name=_name,
+                        handler=_make_proxy(_name),
+                        description=f"Proxy to graph-discovered skill: {_name}",
+                    )
+                    _registered += 1
+                # Register any explicit commands: from frontmatter for ALL skills
                 try:
                     _text = _path.read_text(encoding="utf-8", errors="replace")
                     _text = _text.lstrip("\ufeff")
@@ -1483,7 +1501,7 @@ def register(ctx):
                             if isinstance(_cmds, list):
                                 for _cmd in _cmds:
                                     _cmd = _cmd.lstrip("/").strip()
-                                    if _cmd:
+                                    if _cmd and _cmd != _name:
                                         ctx.register_command(
                                             name=_cmd,
                                             handler=_make_proxy(_name),
