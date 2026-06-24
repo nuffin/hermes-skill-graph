@@ -591,6 +591,13 @@ def _update_single_skill(conn: sqlite3.Connection, skill_name: str) -> bool:
         return False
     now = time.time()
     _upsert_skill(conn, skill_name, skill_path, now)
+    # Mark skills in main ~/.hermes/skills/ dir as needing external organization
+    main_skills = str((Path.home() / ".hermes" / "skills").resolve())
+    if str(skill_path.resolve()).startswith(main_skills):
+        conn.execute(
+            "UPDATE skill_nodes SET needs_organizing = 1 WHERE name = ? AND (needs_organizing IS NULL OR needs_organizing = 0)",
+            (skill_name,),
+        )
     conn.commit()
     logger.debug("skill-graph: updated single skill '%s' (%s)", skill_name, skill_path)
     return True
@@ -623,6 +630,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
                FROM skill_fts f
                JOIN skill_nodes n ON f.name = n.name
                WHERE skill_fts MATCH ?
+                 AND (n.is_deleted IS NULL OR n.is_deleted = 0)
                ORDER BY rank
                LIMIT ?""",
             (fts_query, limit * 2),
@@ -684,7 +692,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
     terms = _extract_terms(query)
     for term in terms:
         cursor = conn.execute(
-            """SELECT name FROM skill_nodes WHERE instr(tags, ?) > 0""",
+            """SELECT name FROM skill_nodes WHERE instr(tags, ?) > 0 AND (is_deleted IS NULL OR is_deleted = 0)""",
             (json.dumps(term),),
         )
         for row in cursor:
@@ -704,7 +712,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             cursor = conn.execute(
                 """SELECT t.skill_name, t.strength, t.source, n.category, n.description
                    FROM skill_terms t
-                   JOIN skill_nodes n ON t.skill_name = n.name
+                   JOIN skill_nodes n ON t.skill_name = n.name AND (n.is_deleted IS NULL OR n.is_deleted = 0)
                    WHERE t.term = ? AND t.skill_name NOT IN ({})
                    ORDER BY t.strength DESC
                    LIMIT 5""".format(",".join("?" for _ in seen)),
@@ -714,7 +722,7 @@ def _search_graph(query: str, conn: sqlite3.Connection, limit: int = 10) -> list
             cursor = conn.execute(
                 """SELECT t.skill_name, t.strength, t.source, n.category, n.description
                    FROM skill_terms t
-                   JOIN skill_nodes n ON t.skill_name = n.name
+                   JOIN skill_nodes n ON t.skill_name = n.name AND (n.is_deleted IS NULL OR n.is_deleted = 0)
                    WHERE t.term = ?
                    ORDER BY t.strength DESC
                    LIMIT 5""",
@@ -803,7 +811,7 @@ def _fallback_search(query: str, conn: sqlite3.Connection, limit: int = 10) -> l
     if not terms:
         # No parseable terms — return top skills by name
         cursor = conn.execute(
-            "SELECT name, category, description, tags, file_path FROM skill_nodes ORDER BY name LIMIT ?",
+            "SELECT name, category, description, tags, file_path FROM skill_nodes WHERE (is_deleted IS NULL OR is_deleted = 0) ORDER BY name LIMIT ?",
             (limit,),
         )
         fallback = []
@@ -824,9 +832,10 @@ def _fallback_search(query: str, conn: sqlite3.Connection, limit: int = 10) -> l
         cursor = conn.execute(
             """SELECT n.name, n.category, n.description, n.tags, n.file_path
                FROM skill_nodes n
-               WHERE instr(n.name, ?) > 0
+               WHERE (n.is_deleted IS NULL OR n.is_deleted = 0)
+                 AND (instr(n.name, ?) > 0
                   OR instr(n.description, ?) > 0
-                  OR instr(n.tags, ?) > 0
+                  OR instr(n.tags, ?) > 0)
                LIMIT ?""",
             (term, term, json.dumps(term), limit),
         )
@@ -876,7 +885,8 @@ def _extract_terms(query: str) -> list[str]:
 def _get_node_info(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None:
     """Fetch full node info from the database."""
     cursor = conn.execute(
-        "SELECT name, category, description, tags, file_path FROM skill_nodes WHERE name = ?",
+        """SELECT name, category, description, tags, file_path, needs_organizing
+           FROM skill_nodes WHERE name = ? AND (is_deleted IS NULL OR is_deleted = 0)""",
         (name,),
     )
     row = cursor.fetchone()
@@ -888,6 +898,7 @@ def _get_node_info(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None
         "description": row["description"],
         "tags": json.loads(row["tags"]) if row["tags"] else [],
         "file_path": row["file_path"],
+        "needs_organizing": bool(row.get("needs_organizing")) or False,
     }
 
 
@@ -931,6 +942,16 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE skill_term_stats ADD COLUMN last_loaded TEXT")
     except sqlite3.OperationalError:
         pass
+    # v3: soft delete + needs_organizing for lifecycle management
+    for col, col_type in (
+        ("is_deleted", "INTEGER DEFAULT 0"),
+        ("deleted_at", "TEXT"),
+        ("needs_organizing", "INTEGER DEFAULT 0"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE skill_nodes ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
 
 # ── Slash command handler ───────────────────────────────────────────────────
@@ -1295,7 +1316,10 @@ def _handle_skill_graph_search(args: dict | None = None, **kw) -> str:
         with _graph_lock:
             if list_all:
                 cursor = conn.execute(
-                    "SELECT name, category, description, tags, file_path FROM skill_nodes ORDER BY name"
+                    """SELECT name, category, description, tags, file_path, needs_organizing
+                       FROM skill_nodes
+                       WHERE (is_deleted IS NULL OR is_deleted = 0)
+                       ORDER BY name"""
                 )
                 results = []
                 for row in cursor:
@@ -1307,6 +1331,7 @@ def _handle_skill_graph_search(args: dict | None = None, **kw) -> str:
                         "file_path": row["file_path"],
                         "relevance": "listed",
                         "score": 0.0,
+                        "needs_organizing": bool(row.get("needs_organizing")) or False,
                     })
                 total = len(results)
                 hint = "All skills listed by name. Call skill_load(name) to load full content."
@@ -1667,7 +1692,7 @@ def register(ctx):
         if not isinstance(args, dict):
             return
         action = args.get("action", "")
-        if action not in ("create", "edit", "patch"):
+        if action not in ("create", "edit", "patch", "delete"):
             return
         skill_name = args.get("name", "")
         if not skill_name:
@@ -1675,9 +1700,17 @@ def register(ctx):
         try:
             conn = _ensure_graph()
             with _graph_lock:
-                updated = _update_single_skill(conn, skill_name)
-            if updated:
-                logger.info("skill-graph: updated skill '%s' after %s", skill_name, action)
+                if action == "delete":
+                    conn.execute(
+                        "UPDATE skill_nodes SET is_deleted = 1, deleted_at = datetime('now') WHERE name = ?",
+                        (skill_name,),
+                    )
+                    conn.commit()
+                    logger.info("skill-graph: soft-deleted skill '%s'", skill_name)
+                else:
+                    updated = _update_single_skill(conn, skill_name)
+                    if updated:
+                        logger.info("skill-graph: updated skill '%s' after %s", skill_name, action)
         except Exception:
             logger.exception("skill-graph: post_tool_call failed for skill '%s'", skill_name)
 
