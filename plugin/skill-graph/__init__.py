@@ -898,7 +898,7 @@ def _get_node_info(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None
         "description": row["description"],
         "tags": json.loads(row["tags"]) if row["tags"] else [],
         "file_path": row["file_path"],
-        "needs_organizing": bool(row.get("needs_organizing")) or False,
+        "needs_organizing": bool(dict(row).get("needs_organizing")) or False,
     }
 
 
@@ -1331,7 +1331,7 @@ def _handle_skill_graph_search(args: dict | None = None, **kw) -> str:
                         "file_path": row["file_path"],
                         "relevance": "listed",
                         "score": 0.0,
-                        "needs_organizing": bool(row.get("needs_organizing")) or False,
+                        "needs_organizing": bool(dict(row).get("needs_organizing")) or False,
                     })
                 total = len(results)
                 hint = "All skills listed by name. Call skill_load(name) to load full content."
