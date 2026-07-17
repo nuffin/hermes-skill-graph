@@ -1802,20 +1802,31 @@ def register(ctx):
             logger.exception("skill-graph: failed to register proxy commands")
 
     def _make_proxy(skill_name: str):
-        """Create a proxy handler that loads the given skill."""
-        def _proxy(_args: str) -> str | None:
+        """Create a proxy handler that loads the skill and injects it as agent input."""
+        def _proxy(_args: str) -> dict | None:
             try:
                 _result = _handle_skill_load({"name": skill_name})
                 _data = json.loads(_result)
-                if _data.get("success"):
-                    _content = _data.get("content", "")
-                    return (
-                        f"Loaded skill: {skill_name}\n"
-                        f"  Description: {_data.get('description', '')}\n"
-                        f"  Category:    {_data.get('category', '')}\n"
-                        f"  Content ({len(_content)} chars):\n"
-                        f"{_content[:500]}\n..."
-                    )
+                if not _data.get("success"):
+                    return None
+                _content = _data.get("content", "")
+                _skill_dir = _data.get("skill_dir", "")
+                _name = _data.get("name", skill_name)
+
+                parts = [
+                    f"[IMPORTANT: The user has invoked the {_name} skill. "
+                    f"The full skill content is loaded below.]",
+                    "",
+                    _content.strip(),
+                ]
+                if _skill_dir:
+                    parts.extend(["", f"[Skill directory: {_skill_dir}]"])
+                if _args:
+                    parts.extend(["",
+                        f"The user has provided the following instruction "
+                        f"alongside the skill invocation: {_args}"])
+
+                return {"action": "inject", "content": "\n".join(parts)}
             except Exception:
                 pass
             return None
@@ -1878,6 +1889,33 @@ def register(ctx):
             logger.exception("skill-graph: post_tool_call failed for skill '%s'", skill_name)
 
     ctx.register_hook("post_tool_call", _on_post_tool_call)
+
+    # ── Monkey-patch skill_view to fall back to skill-graph ──
+    try:
+        import tools.skills_tool as _st
+        _orig_skill_view = _st.skill_view
+
+        def _patched_skill_view(
+            name: str,
+            file_path: str | None = None,
+            task_id: str | None = None,
+            preprocess: bool = True,
+        ) -> str:
+            result = _orig_skill_view(
+                name, file_path=file_path,
+                task_id=task_id, preprocess=preprocess,
+            )
+            data = json.loads(result)
+            if data.get("success") or file_path:
+                return result
+            sg = _handle_skill_load({"name": name})
+            sg_data = json.loads(sg)
+            return sg if sg_data.get("success") else result
+
+        _st.skill_view = _patched_skill_view
+        logger.info("skill-graph: patched skill_view with graph fallback")
+    except Exception:
+        logger.exception("skill-graph: failed to patch skill_view")
 
     logger.info(
         "skill-graph plugin registered: tools=skill_graph_search+skill_load+skill_graph_config, "
