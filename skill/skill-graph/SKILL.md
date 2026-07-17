@@ -38,6 +38,19 @@ tells you which skill to search for via the knowledge graph.
 
 Never use search_files / shell ls/cat before step 4.
 Never plan from scratch — the graph has the skills you need.
+
+## Multi-Intent Handling
+
+If the user's request contains multiple intents (e.g. "查项目然后做
+代码审查"), process them **sequentially** — not in parallel:
+
+1. Extract intents: identify each distinct goal
+2. Process the first intent: classify → route → search → load → execute
+3. Process the second intent: same flow
+4. Summarize: combine results into one response
+
+Do NOT merge intents into a single search query. Each intent gets its
+own skill_graph_search / skill_load cycle.
 ```
 
 ## Loader Protocol
@@ -51,6 +64,9 @@ After loading a skill via `skill_load()`, verify it fits the current task:
   match the task — call `skill_graph_search()` again with different
   keywords.
 - **Good match?** Continue with execution.
+- **Graph returned something? Even if the description doesn't look
+  perfect, load it and check. The graph may have injected names via
+  hooks that aren't visible in the description.**
 
 Pipelines should declare their scope explicitly in the description
 so the agent can judge fit before executing.
@@ -106,6 +122,8 @@ The table below maps common intent types to keyword-rich search queries.
 Add more keywords relevant to the specific context — more terms increase
 the graph's ability to find the right match via its scoring pipeline.
 
+**Always include the specific name or entity the user mentioned.**
+
 | User intent | Search query (add more context keywords!) |
 |------------|------------------------------------------|
 | View / understand project | `skill_graph_search("project overview structure analysis document")` |
@@ -114,6 +132,9 @@ the graph's ability to find the right match via its scoring pipeline.
 | Code review | `skill_graph_search("code review static analysis audit quality")` |
 | Write PRD / requirements | `skill_graph_search("product requirements document specification")` |
 | Debug a program | `skill_graph_search("debug root cause analysis investigation")` |
+| Code modification / bug fix | `skill_graph_search("bug-fix pipeline")` → skill_load("bug-fix-pipeline") |
+| Code development / new feature | `skill_graph_search("quick-dev pipeline")` → skill_load("quick-dev-pipeline") |
+| Plugin / skill development | `skill_graph_search("feature-development-workflow")` → skill_load("feature-development-workflow") |
 | Design / prototype | `skill_graph_search("design prototype mockup wireframe")` |
 | Architecture analysis | `skill_graph_search("architecture design analysis discovery")` |
 | Domain research | `skill_graph_search("domain analysis market research feasibility")` |
@@ -206,3 +227,13 @@ Hermes writes it to `~/.hermes/skills/<name>/`.
 For standalone project users: after creating, move the skill to
 `$HERMES_HOME/skill-graph/agent-created/` and run
 `/skill-graph rebuild` to index it without bloating the system prompt.
+
+## Domain-Specific Routing
+
+For routing extensions specific to the installed skill ecosystem
+(scene activation, troupe entity lookup, pipeline context),
+load the file configured at `skills.config.skill-graph.extensions_file`
+in config.yaml.
+
+This file extends the Phase 4 Routing Table and Phase 3 Pre-flight Check
+with domain-specific entries.
