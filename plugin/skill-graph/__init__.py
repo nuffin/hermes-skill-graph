@@ -1700,7 +1700,7 @@ def register(ctx):
     )
 
     # ── Hook: pre_tool_call — block find/read_file/recall if graph not searched ──
-    _gated_tools = frozenset({"find", "read_file", "session_search"})
+    _gated_tools = frozenset({"find", "read_file"})
     _graph_searched_turn: dict[str, bool] = {}  # turn_id → searched
 
     def _on_pre_tool_call(tool_name: str, args: dict | None = None, **kw: Any) -> dict | str | None:
